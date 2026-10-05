@@ -54,7 +54,7 @@ The bootstrap package is the composition root. It is the only part that selects 
 
 The Python application is the sequencing source. The `autobuild` skill supplies project facts to the command and launches it. The skill does not implement a second campaign or item workflow.
 
-The `autobuild-plan` skill sits before execution. It researches the requested outcome, writes and reviews an end-to-end plan, and registers the resulting queue. It stops before launch unless the owner has already authorised execution.
+The `autobuild-plan` skill sits before execution. It researches the requested outcome, probes the riskiest step, writes a decision brief with the next slice in full and every later item in one line, has the slice reviewed, and registers the resulting queue. It stops before launch unless the owner has already authorised execution.
 
 The repository and source archive contain both skills. The wheel contains the Python application and its `autobuild` command. Skill installation remains with the coding assistant because each host owns its skill directory and loading rules.
 
@@ -169,13 +169,13 @@ Tracker state and product state use separate commits.
 
 For an accepted item:
 
-1. The tracker adapter records and pushes the claim from the primary checkout.
+1. The tracker adapter records the claim from the primary checkout. A self-committing tracker (Pinax) commits and publishes it in the same command.
 2. The workspace adapter creates an item branch and worktree from that claimed revision.
 3. The builder changes product files in the worktree.
 4. The workspace adapter excludes the selected tracker paths from the product diff.
 5. It creates the product commit from the reviewed path set.
 6. The tracker adapter writes the done state in the worktree.
-7. The workspace adapter creates the tracker commit.
+7. The workspace adapter returns the tracker commit. With Pinax, the done command made it, and the adapter verifies it is exactly one commit, directly on the product commit, touching only tracker paths. With the Markdown backlog, the workspace adapter creates it.
 8. It merges the item branch into the default branch with `--no-ff`.
 9. It pushes the default branch and verifies the remote commit.
 
@@ -189,7 +189,7 @@ The primary checkout must be clean before a claim and before delivery. This rule
 
 The Pinax adapter delegates ordering, readiness, dependencies, gates, and event folding to the `pinax` command. It requires `.ergon/` and an approved note reference for each selected item.
 
-Claim, park, close, and proposal events are committed under `.ergon/`. A refill proposal receives a Pinax proposal gate and stays outside the ready queue.
+Pinax 0.2.1 or later commits every claim, park, close, and proposal event under `.ergon/` itself. The adapter never stages or commits tracker files; after each command it checks that HEAD moved, every non-merge commit the command added on the first-parent chain touches tracker paths only (a merge that takes another writer's published work is not checked), and no tracker file is left uncommitted. It reads Pinax's JSON result: a claim committed on a branch Pinax does not publish is accepted in `current-branch-pr` and stops in every other mode, and a write that was not pushed is recorded as unpublished. The tracker adapter declares that it commits itself, and composition hands that declaration to the workspace adapter. An installed Pinax that leaves its change uncommitted stops the campaign with the `tracker_environment` reason and names the required version. Exit 3 on a claim means another writer holds the item, and the campaign selects the next one; any other exit 4 stops with `tracker_environment` and the cause Pinax reported; exits 1, 2, 5, 6 and 7 stop with `tracker_refused` and carry the code and Pinax's message. A refill proposal receives a Pinax proposal gate and stays outside the ready queue.
 
 ### Markdown backlog
 

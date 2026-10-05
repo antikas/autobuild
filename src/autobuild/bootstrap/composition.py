@@ -188,7 +188,10 @@ def _runtime(
     push_primary = (
         delivery_mode is DeliveryMode.PROTECTED_DEFAULT or push_current_branch
     )
-    pinax = PinaxTrackerAdapter(settings.repository, push_primary=push_primary)
+    pinax = PinaxTrackerAdapter(
+        settings.repository,
+        accept_unpublished_claims=delivery_mode is DeliveryMode.CURRENT_BRANCH_PR,
+    )
     backlog = BacklogTrackerAdapter(
         settings.repository, settings.backlog_path, push_primary=push_primary
     )
@@ -219,7 +222,9 @@ def _runtime(
     )
     lease = FilesystemLeaseAdapter(scratch, stale_seconds=settings.lease_stale_seconds)
     workspace = GitWorkspaceAdapter(
-        scratch / "workspace", tracker_paths=tracker_paths
+        scratch / "workspace",
+        tracker_paths=tracker_paths,
+        tracker_commits_itself=tracker.commits_itself,
     )
     if settings.refill_plan is not None:
         for proposal in settings.refill_plan.proposals:
@@ -572,12 +577,9 @@ def _specification(
     target_revision: str,
     push_current_branch: bool,
     allow_current_branch_default: bool,
+    lane_efforts: tuple[tuple[str, Seat, EffortLevel], ...] | None = None,
 ):
-    lane_efforts = tuple(
-        (lane.name, seat, effort)
-        for lane in settings.lanes
-        for seat, effort in lane.efforts().items()
-    )
+    resolved_lane_efforts = lane_efforts if lane_efforts is not None else _lane_efforts(settings)
 
     def for_item(item) -> ItemExecutionSpec:
         brief_path = Path(item.brief_ref).expanduser()
@@ -601,7 +603,7 @@ def _specification(
             builder_model_class="builder",
             reviewer_model_class="reviewer",
             specialist_model_class="specialist",
-            lane_efforts=lane_efforts,
+            lane_efforts=resolved_lane_efforts,
             seat_timeout_seconds=seat_timeout,
             seat_stall_seconds=settings.seat_stall_seconds,
             command_timeout_seconds=settings.command_timeout_seconds,
@@ -614,6 +616,31 @@ def _specification(
         )
 
     return for_item
+
+
+def _lane_efforts(settings: RunSettings) -> tuple[tuple[str, Seat, EffortLevel], ...]:
+    return tuple(
+        (lane.name, seat, effort)
+        for lane in settings.lanes
+        for seat, effort in lane.efforts().items()
+    )
+
+
+def _starting_lane_efforts(
+    settings: RunSettings, lane_efforts: tuple[tuple[str, Seat, EffortLevel], ...]
+) -> dict[str, EffortLevel | None]:
+    starting_lane = settings.lanes[0].name
+    return {
+        seat.value: next(
+            (
+                effort
+                for lane, configured_seat, effort in lane_efforts
+                if lane == starting_lane and configured_seat is seat
+            ),
+            None,
+        )
+        for seat in Seat
+    }
 
 
 def run_campaign(
@@ -699,6 +726,7 @@ def run_campaign(
     )
     refill = settings.refill_plan or RefillPlan()
     target_branch = repository.current_branch or repository.default_branch
+    lane_efforts = _lane_efforts(settings)
     context = CampaignContext(
         harness=settings.harness,
         models={
@@ -710,6 +738,7 @@ def run_campaign(
         validator_id=settings.validator_id,
         target_branch=target_branch,
         target_revision=repository.revision,
+        efforts=_starting_lane_efforts(settings, lane_efforts),
         push_current_branch=push_current_branch,
         allow_current_branch_default=allow_current_branch_default,
         tracker_surface=tracker_surface,
@@ -723,6 +752,7 @@ def run_campaign(
             repository.revision,
             push_current_branch,
             allow_current_branch_default,
+            lane_efforts,
         ),
         refill,
         context=context,

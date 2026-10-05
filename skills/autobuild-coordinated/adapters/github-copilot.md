@@ -4,10 +4,10 @@ The protocol in `SKILL.md` and `rules.md` is unchanged here. This file maps its 
 
 ## Seats
 
-Copilot has no in-session subagent tool. A fresh seat is a separate Copilot CLI process started from the coordinator's shell with a custom agent and an explicit prompt, the same way the AutoBuild application drives its Copilot harness. This command passes no effort, so a seat runs at the effort Copilot is configured with, whatever the profile names:
+Copilot has no in-session subagent tool. A fresh seat is a separate Copilot CLI process started from the coordinator's shell with a custom agent and an explicit prompt, the same way the AutoBuild application drives its Copilot harness. When `<effort>` is set, place the Copilot effort option immediately after the model option. Omit the option when no effort is set:
 
 ```text
-copilot -C <lane-path> --agent autobuild-builder --prompt - --model=<tier> \
+copilot -C <lane-path> --agent autobuild-builder --prompt - --model=<tier> --reasoning-effort=<effort> \
   --session-id <uuid> --available-tools=<list> --allow-tool=<list> \
   --no-ask-user --no-auto-update --no-custom-instructions --no-experimental --no-remote \
   --no-remote-export --disable-builtin-mcps --disallow-temp-dir --no-bash-env --no-color \
@@ -17,6 +17,7 @@ copilot -C <lane-path> --agent autobuild-builder --prompt - --model=<tier> \
 - `agents/autobuild-builder.agent.md` and `agents/autobuild-reviewer.agent.md` are the custom agents. Install them to `~/.copilot/agents/` (personal) or a repository's `.github/agents/` (project). The file name without `.agent.md` is the `--agent` value.
 - The rendered brief is written to a file under the scratch root and piped to standard input (`--prompt -`); the seat's JSON output is read from its log directory. A correction round is a new process whose prompt quotes the reviewer's finding and names the lane; the seat has no memory between rounds, so the brief carries everything.
 - `--disallow-temp-dir` and the child environment (TMPDIR, TEMP, TMP, cache paths) point at the scratch root, as in the application.
+- GitHub Copilot CLI 1.0.88 or later reports a level the model does not offer and leaves it unapplied, so select an effort the model offers.
 
 ## Tool policy
 
@@ -37,4 +38,4 @@ Copilot's temporary directory policy is enforced by `--disallow-temp-dir`; the a
 
 ## Records
 
-Tracker commands are as in `SKILL.md`; the coordinator runs them in the main tree.
+Tracker commands are as in `SKILL.md`; the coordinator runs them in the main tree. Pinax 0.2.1 or later commits each command itself, so the coordinator never commits `.ergon` by hand; a `BACKLOG.md` change is committed by the coordinator.

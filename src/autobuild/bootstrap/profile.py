@@ -250,6 +250,77 @@ def _effort(value: object, label: str) -> EffortLevel | None:
 _EFFORT_KEYS = ("builder_effort", "reviewer_effort", "specialist_effort")
 
 
+_PROFILE_ALLOWED_KEYS: dict[str, frozenset[str]] = {
+    "profile": frozenset(
+        {
+            "run", "models", "validator", "harness", "policy", "tracker", "preflight",
+            "refill", "knowledge", "selection", "progress", "lanes",
+        }
+    ),
+    "run": frozenset(
+        {
+            "harness", "max_items", "seat_timeout_seconds", "seat_stall_seconds",
+            "lease_stale_seconds", "command_timeout_seconds", "item_classes", "scratch_root",
+            "lanes", "lane_state_root", "lane_cool_seconds",
+        }
+    ),
+    "models": frozenset({"builder", "reviewer", "specialist", *_EFFORT_KEYS}),
+    "validator": frozenset({"id", "argv", "budget_seconds"}),
+    "harness": frozenset({"command"}),
+    "policy": frozenset({"allowed_tools", "allowed_roots"}),
+    "tracker": frozenset({"kind", "path"}),
+    "preflight": frozenset({"tls_targets", "accepted_environment"}),
+    "refill": frozenset({"plan"}),
+    "knowledge": frozenset({"command", "fog_ledger"}),
+    "selection": frozenset({"allow", "exclude"}),
+    "progress": frozenset({"command", "file", "stderr", "command_timeout_seconds"}),
+    "lanes.*": frozenset({"builder", "reviewer", "specialist", *_EFFORT_KEYS}),
+}
+
+
+def _unknown_fields(
+    table_name: str, table: Mapping[str, Any], allowed_keys: frozenset[str]
+) -> str | None:
+    unknown = set(table) - allowed_keys
+    if unknown:
+        return f"{table_name} contains unknown fields: " + ", ".join(sorted(unknown))
+    return None
+
+
+def _validate_profile_fields(document: Mapping[str, Any]) -> None:
+    messages: list[str] = []
+    profile_message = _unknown_fields(
+        "profile", document, _PROFILE_ALLOWED_KEYS["profile"]
+    )
+    if profile_message is not None:
+        messages.append(profile_message)
+    lanes = document.get("lanes")
+    if lanes is not None:
+        if not isinstance(lanes, Mapping):
+            raise ConfigurationError("[lanes] must be a TOML table")
+        for lane_name, lane in lanes.items():
+            if not isinstance(lane, Mapping):
+                raise ConfigurationError(f"[lanes.{lane_name}] must be a TOML table")
+            lane_message = _unknown_fields(
+                f"lanes.{lane_name}", lane, _PROFILE_ALLOWED_KEYS["lanes.*"]
+            )
+            if lane_message is not None:
+                messages.append(lane_message)
+    for table_name, allowed_keys in _PROFILE_ALLOWED_KEYS.items():
+        if table_name in {"profile", "lanes.*"}:
+            continue
+        table = document.get(table_name)
+        if table is None:
+            continue
+        if not isinstance(table, Mapping):
+            raise ConfigurationError(f"[{table_name}] must be a TOML table")
+        table_message = _unknown_fields(table_name, table, allowed_keys)
+        if table_message is not None:
+            messages.append(table_message)
+    if messages:
+        raise ConfigurationError("; ".join(messages))
+
+
 def _seat_efforts(
     table: Mapping[str, Any], prefix: str
 ) -> tuple[EffortLevel | None, EffortLevel | None, EffortLevel | None]:
@@ -320,6 +391,18 @@ def _lane_profile(lanes_table: Mapping[str, Any], name: str) -> LaneProfile:
     )
 
 
+def _validate_parked_lane(lanes_table: Mapping[str, Any], name: str) -> None:
+    """Validate present values in a lane table that is not selected to run."""
+
+    table = lanes_table[name]
+    assert isinstance(table, Mapping)
+    prefix = f"lanes.{name}"
+    for key in ("builder", "reviewer", "specialist"):
+        if key in table:
+            _optional_string(table[key], f"{prefix}.{key}")
+    _seat_efforts(table, prefix)
+
+
 def _lanes_and_validator(
     document: Mapping[str, Any],
     run: Mapping[str, Any],
@@ -352,6 +435,9 @@ def _lanes_and_validator(
                 )
             order = [selected, *[name for name in order if name != selected]]
         lanes_table = _table(document, "lanes")
+        for name in lanes_table:
+            if name not in order:
+                _validate_parked_lane(lanes_table, name)
         lanes = tuple(_lane_profile(lanes_table, name) for name in order)
         if validator_id is None:
             raise ConfigurationError("missing required run configuration: validator.id")
@@ -574,6 +660,7 @@ def load_settings(
         else None
     )
     document, resolved_profile = _load_document(selected_profile)
+    _validate_profile_fields(document)
     base = resolved_profile.parent if resolved_profile is not None else resolved_repository
     run = _table(document, "run")
     models = _table(document, "models")

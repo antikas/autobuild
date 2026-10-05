@@ -371,14 +371,14 @@ class EnforcedTrackerPort:
 
     def park(
         self, item_id: str, reason: str, actor: str, workspace: WorkspaceRef | None = None
-    ) -> None:
+    ):
         if not item_id.strip() or not reason.strip() or not actor.strip():
             raise EvidenceError("park requires item, concrete reason, and actor")
         if workspace is not None:
             _require_workspace(workspace, self._config)
         elif not self._config.allow_repository_mutation:
             raise PolicyViolation("primary tracker park has no repository-mutation gate")
-        self._port.park(item_id, reason, actor, workspace)
+        return self._port.park(item_id, reason, actor, workspace)
 
     def propose(self, proposal: Proposal, actor: str):
         if not actor.strip():

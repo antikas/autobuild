@@ -14,14 +14,14 @@ The planning stage:
 
 1. Finds the existing specifications, decisions, plans, and live tracker state.
 2. Inspects the code, tests, deployment path, documentation, and publication surfaces affected by the request.
-3. Writes an end-to-end plan with acceptance criteria, dependencies, owner gates, and the project validator.
-4. Runs four independent reviews covering scope, execution readiness, architecture, and failure risks.
-5. Applies accepted corrections and records the review result beside the plan.
-6. Registers ready items in [Pinax](https://github.com/antikas/pinax-tracker) or `BACKLOG.md`.
-7. Registers production deployment, publication, and unresolved owner decisions as blocked items.
-8. Reports the plan, queue, decisions, gates, and launch command, then stops.
+3. Runs the riskiest real step once in a scratch copy, so the plan starts from what actually happens.
+4. Writes a decision brief, one block of owner inputs, the next slice of work in full, and one line for each later item through deployment and publication.
+5. Has one independent reviewer check the next slice, applies accepted corrections, and records the review result beside the plan.
+6. Registers the next slice in [Pinax](https://github.com/antikas/pinax-tracker) or `BACKLOG.md`, and each later item as a blocked one-line item.
+7. Registers owner decisions, production deployment, and publication as blocked owner gates. Machine and other-repository work is registered for the coordinator, not the owner.
+8. Reports the brief, the probe result, the review result, the owner inputs, and the launch command, then stops.
 
-The owner reviews the plan and queue before execution. The planning stage can write planning documents and tracker records. It does not start a builder or change product code.
+The owner answers the inputs and approves the launch in one reply. The planning stage can write planning documents and tracker records. It does not start a builder or change product code. Its probe runs in a scratch copy and changes nothing shared.
 
 If the repository already has an approved queue and complete briefs, start with stage 2. If the coding assistant cannot load `SKILL.md` files, follow the same planning steps manually and register the queue before execution.
 
@@ -97,11 +97,13 @@ Start with a clean working tree. AutoBuild refuses to claim an item from a dirty
 
 ## Install AutoBuild
 
-Release 0.6.0 is published to PyPI as `autobuild-factory` and provides a Python wheel and source archive on the [GitHub release page](https://github.com/antikas/autobuild-factory/releases/tag/autobuild-factory-0.6.0). Install the released command from PyPI:
+Release 0.7.0 is published to PyPI as `autobuild-factory` and provides a Python wheel and source archive on the [GitHub release page](https://github.com/antikas/autobuild-factory/releases/tag/autobuild-factory-0.7.0). Install the released command from PyPI:
 
 ```text
-uv tool install autobuild-factory==0.6.0
+uv tool install autobuild-factory==0.7.0
 ```
+
+AutoBuild 0.7.0 needs pinax-tracker 0.2.1 or later when the project uses Pinax. From 0.7.0 Pinax commits every tracker change itself and AutoBuild only verifies that commit; an earlier Pinax leaves the change uncommitted and AutoBuild stops at the first claim. Do not use AutoBuild 0.6.0 or earlier with pinax-tracker 0.2.1 or later: those versions commit the tracker change themselves and refuse a tracker that has already committed it.
 
 Check the command:
 
@@ -132,7 +134,7 @@ Install `uv` with Homebrew, then install AutoBuild:
 
 ```text
 brew install uv
-uv tool install autobuild-factory==0.6.0
+uv tool install autobuild-factory==0.7.0
 autobuild --help
 ```
 
@@ -277,19 +279,21 @@ If both trackers are usable, Pinax wins. Selection happens during startup and st
 
 Pinax is a Git-native tracker. Its event log and generated views live in `.ergon/` inside the repository.
 
-Install it:
+Install pinax-tracker 0.2.1 or later. AutoBuild 0.7.0 and later need it, and earlier AutoBuild versions must not be used with it:
 
 ```text
-pipx install pinax-tracker
+pipx install "pinax-tracker>=0.2.1"
 pinax --help
 ```
 
 The [Pinax repository](https://github.com/antikas/pinax-tracker) also documents installation with `pip`.
 
-Initialise the target repository and add an item:
+Initialise the target repository and add an item. `pinax init` creates `.ergon/` without committing it, so commit that once; every later Pinax command commits itself:
 
 ```text
 pinax init --actor your-name@your-machine
+git add .ergon
+git commit -m "ADDED: initialise Pinax"
 pinax add --title "Add the account summary" --prefix app --allow-new-prefix --actor your-name@your-machine --json
 ```
 
@@ -299,11 +303,11 @@ The add command returns an item identifier. Attach the approved brief to that it
 pinax note add <item-id> --ref docs/items/APP-001.md --caption "The dashboard shows the account name and formatted balance." --actor your-name@your-machine --json
 ```
 
-Commit and push the initial tracker state:
+Every mutating Pinax command (add, note add, claim, done, block, park, dep add) commits its own change, and pushes it when the remote default branch is checked out. After the initial commit, never stage or commit `.ergon` by hand. Commit and push the brief:
 
 ```text
-git add .ergon docs/items/APP-001.md
-git commit -m "ADDED: register account summary work"
+git add docs/items/APP-001.md
+git commit -m "ADDED: brief for the account summary"
 git push origin HEAD
 pinax status
 ```
@@ -375,6 +379,8 @@ autobuild run --repository . --tracker backlog --backlog docs/QUEUE.md --deliver
 ## Create the project profile
 
 Create `.autobuild.toml` at the repository root. This file supplies facts that AutoBuild must not guess.
+
+AutoBuild refuses unknown top-level profile fields and unknown fields in every profile table. It reports every unknown field in one error. `[run.item_classes]` class names and `[lanes]` lane names remain open names; a class value must be a positive number of seconds, and a lane table must use the documented fields.
 
 ```toml
 [run]
@@ -525,7 +531,7 @@ reviewer = "gpt-5.6"
 specialist = "gpt-5.6"
 ```
 
-`run.lanes` names the lanes in order of preference. Each name must have a `[lanes.<harness>]` table with `builder` and `reviewer` model names; `specialist` is optional and defaults to the reviewer model. Each lane table also accepts the optional `builder_effort`, `reviewer_effort`, and `specialist_effort` keys, with the values and defaults described in "Model settings". Effort belongs to the lane: a seat runs at the effort its current lane sets, so a seat that moves to the next lane after a limit takes that lane's effort, and a lane without the key passes no effort and uses its harness default. In the example the `github-copilot` lane sets no effort. `[models]` is not read when `run.lanes` is set, so an effort key there stops the launch with an error that names the key and points to the lane tables. Before any lane is probed, AutoBuild refuses to launch when a lane sets an effort its harness adapter cannot pass, and the error names the lane and the seat. A name listed twice in `run.lanes` also stops the launch, with an error that names it. Lane choice is made at launch: preflight probes every listed lane, cools any lane whose executable is missing, unauthenticated or lacking a required capability with the `probe` signature, and starts the first capable lane. Pass `--harness <name>` to move a listed lane to the front for one launch.
+`run.lanes` names the lanes in order of preference. Each name must have a `[lanes.<harness>]` table with `builder` and `reviewer` model names; `specialist` is optional and defaults to the reviewer model. A lane table whose name is absent from `run.lanes` is parked: its present model names and effort values are checked, but its missing model keys are allowed. A parked lane is not resolved, probed, or selected by `--harness`, so it has no effect on the active lane order. Each lane table also accepts the optional `builder_effort`, `reviewer_effort`, and `specialist_effort` keys, with the values and defaults described in "Model settings". Effort belongs to the lane: a seat runs at the effort its current lane sets, so a seat that moves to the next lane after a limit takes that lane's effort, and a lane without the key passes no effort and uses its harness default. In the example the `github-copilot` lane sets no effort. `[models]` is not read when `run.lanes` is set, so an effort key there stops the launch with an error that names the key and points to the lane tables. Before any active lane is probed, AutoBuild refuses to launch when it sets an effort its harness adapter cannot pass, and the error names the lane and the seat. A name listed twice in `run.lanes` also stops the launch, with an error that names it. Lane choice is made at launch: preflight probes every listed lane, cools any lane whose executable is missing, unauthenticated or lacking a required capability with the `probe` signature, and starts the first capable lane. Pass `--harness <name>` to move a listed lane to the front for one launch.
 
 When a seat hits a structural limit on the active lane, that lane cools and the seat re-runs on the next capable lane. A limit is read only from the harness CLI's exit code and structured error fields, never from words in the event stream, so a report that mentions "rate limit" in prose with a clean exit and a valid result never cools a lane. When the vendor supplies a reset time the lane cools until then; otherwise it cools for `run.lane_cool_seconds` (default 3600). When no capable lane remains, the item parks with the lane signature, its worktree evidence is kept, and the campaign stops with the `lanes_exhausted` reason.
 
@@ -623,7 +629,7 @@ autobuild run --repository . --delivery-mode current-branch-pr --allow-delivery
 
 `--allow-delivery` is the human gate for repository changes. AutoBuild stops before adapter preflight when the flag is absent. It does not decide where the result is delivered.
 
-`current-branch-pr` captures the branch and revision of the checkout that starts the campaign. Accepted product and tracker commits merge into that branch. AutoBuild does not check out, merge into, or push the default branch. It also does not push the current branch unless you add `--push-current-branch`. The mode refuses a current branch that is the detected default branch unless you also pass `--allow-current-branch-default`.
+`current-branch-pr` captures the branch and revision of the checkout that starts the campaign. Accepted product and tracker commits merge into that branch. With Pinax, a claim made on that branch is committed there and not published, because Pinax publishes only from the remote default branch: AutoBuild accepts it in this mode, the claim is published with the pull request, and other machines do not see the claim until the pull request merges. In `protected-default`, the same unpublished claim stops the campaign with `tracker_environment`. AutoBuild does not check out, merge into, or push the default branch. It also does not push the current branch unless you add `--push-current-branch`. The mode refuses a current branch that is the detected default branch unless you also pass `--allow-current-branch-default`.
 
 Use protected delivery only after a human has approved a merge and push to the default branch:
 
@@ -672,9 +678,9 @@ The command prints `autobuild.campaign-result.v1` JSON. It includes:
 - the committed repository report path
 - `progress_ref`, the absolute path of the plain-language progress log
 
-At the end of every campaign AutoBuild commits a report to `docs/campaigns/<campaign-id>.md` in the repository. The report lists Shipped items with their item and merged commits, Parked items with reasons, Failed items with errors, Follow-ups created during the campaign, the Next ready item, and a per-item table of seat durations and token usage. When the campaign runs with an allow-list, the report also lists every allowed item it left unbuilt with a reason: not ready, blocked, excluded, item bound, or lanes exhausted. The report commit is a tracker-class commit that touches only that path and is delivered through the selected delivery mode: pushed in `protected-default`, kept local in `current-branch-pr`.
+At the end of every campaign AutoBuild commits a report to `docs/campaigns/<campaign-id>.md` in the repository. The report lists Shipped items with their item and merged commits, Parked items with reasons, Failed items with errors, Follow-ups created during the campaign, the Next ready item, and a per-item table of each seat's lane, resolved model, requested effort, duration, and token usage. When the campaign runs with an allow-list, the report also lists every allowed item it left unbuilt with a reason: not ready, blocked, excluded, item bound, or lanes exhausted. The report commit is a tracker-class commit that touches only that path and is delivered through the selected delivery mode: pushed in `protected-default`, kept local in `current-branch-pr`.
 
-Every run event carries a real UTC timestamp and a JSON payload. The `campaign.started` payload names the harness, models, item bound, delivery mode, validator id, and manifest path. A `seat.completed` payload is written for each builder, reviewer, and specialist invocation with the seat, model class, requested effort (`null` when the seat requested none), resolved model, outcome, exit code, start and end times, duration, input and output tokens, cost, and raw output and stderr references. The `validation.completed`, `review.completed`, `specialist.completed`, `item.parked`, `item.finalised`, and `campaign.completed` events carry their own payload fields. An `item.correcting` event is appended when an item enters a correction round, with its `round` and the `triggering_evidence_ref` of the review that asked for the change.
+Every run event carries a real UTC timestamp and a JSON payload. The `campaign.started` payload names the harness, models, requested efforts, item bound, delivery mode, validator id, and manifest path. The harness, models and efforts describe the first lane in the resolved lane order, which is the lane AutoBuild probes first; when that lane cools at preflight and the campaign starts on the next capable lane, these three fields still describe the first lane, and the lane each seat actually ran on is in its `seat.completed` payload. The payload carries `null` for a seat that does not request an effort. A `seat.completed` payload is written for each builder, reviewer, and specialist invocation with the seat, model class, requested effort (`null` when the seat requested none), resolved model, outcome, exit code, start and end times, duration, input and output tokens, cost, and raw output and stderr references. The `validation.completed`, `review.completed`, `specialist.completed`, `item.parked`, `item.finalised`, and `campaign.completed` events carry their own payload fields. An `item.correcting` event is appended when an item enters a correction round, with its `round` and the `triggering_evidence_ref` of the review that asked for the change.
 
 Each run directory also holds `progress.log`, the plain-language progress lines rendered from those same events, one per line and prefixed with the event UTC timestamp. The lines cover the campaign start, each item claim, seat completion, validation, review decision, correction round, park, delivery, and the campaign completion counts and report path.
 
@@ -685,6 +691,10 @@ The stop reason is one of:
 - `structural_failure`: required evidence or a contract was invalid
 - `scope_fence_violation`: the tracker offered an item outside the allow-list or inside the exclude-list; the campaign stopped without a claim
 - `lanes_exhausted`: every configured harness lane cooled on a subscription limit or spawn failure; the current item parked with the lane signature and its worktree evidence was kept
+- `tracker_environment`: a tracker write could not proceed in this environment. Either Pinax ended with exit 4 and the message states the cause Pinax reported (the remote could not be reached or read, the repository is inside another repository, or a claim was committed on a branch Pinax does not publish outside `current-branch-pr`), or the installed Pinax left its change uncommitted (pinax-tracker 0.2.1 or later is required). The item failed with that message; its worktree, if any, was kept and its worktree lease released
+- `tracker_refused`: Pinax refused a tracker write with exit 1 (unknown item), 2 (invalid actor), 5 (push rejected on every attempt), 6 (clock behind the newest published event) or 7 (commit refused, event left uncommitted); the item failed with the exit code and Pinax's message, no park was attempted, its worktree, if any, was kept and its worktree lease released
+
+A claim that Pinax reports superseded (exit 3) is not a stop: another writer holds the item, the run record gains an `item.claim_taken` event, and the campaign selects the next item. A claim, park or proposal that Pinax committed without pushing is not a stop either: the run record gains a `tracker.unpublished` event, the progress log says so, and the report lists it under Unpublished tracker writes; it goes out with the next push of its branch. A park or proposal from the primary checkout is refused while that checkout holds staged or modified non-tracker files, and a tracker commit that touches any non-tracker path is refused.
 
 The process exit code is:
 

@@ -1,65 +1,66 @@
 ---
 name: autobuild-plan
-description: Turn one build request into an AutoBuild-ready plan and registered queue. The skill researches the current system, covers build through publication, runs four independent review lenses, and stops before launch. Use autobuild for execution. Use a builder directly for one specified item.
+description: Turn one build request into a short AutoBuild-ready plan and a registered queue. The skill researches the current system, runs the riskiest real step once in a scratch copy, writes a decision brief with one block of owner inputs and the next slice in full, gets one independent review, registers the queue and stops before launch. Use autobuild for execution. Use a builder directly for one specified item.
 user-invocable: true
 ---
 
 # autobuild-plan
 
-This skill produces the plan that `/autobuild` later executes. It researches the request, writes the plan, runs the review gate, and registers the queue. It stops before launch unless the owner has already authorised execution.
+This skill produces the plan that `/autobuild` later executes. It stops before launch unless the owner has already authorised execution.
 
-**SSOTs this skill points at, never restates:** the sibling AutoBuild skill (`../autobuild/SKILL.md`) for invocation and `../../docs/running-autobuild.md` for tracker, validator and refill configuration. If your environment carries its own dispatch rules or agent definitions, read those directly too.
+**Sources this skill points at, never restates:** the sibling AutoBuild skill (`../autobuild/SKILL.md`) for invocation; `../../docs/running-autobuild.md` for briefs, tracker, validator and refill configuration; `../autobuild-coordinated/rules.md` for how a coordinator repairs, releases gates and verifies during a campaign. Read any dispatch rules or agent definitions the environment carries.
+
+## The shape of a plan
+
+A plan is a decision brief, one block of owner inputs, the next slice in full, and one line for each later item. A later item gets its full brief when it becomes the next slice, written from what the earlier slices taught.
+
+A plan fixes outcomes, acceptance criteria and authority. It does not prescribe routine execution choices. Every fixed detail is something that can be wrong and that a reviewer will find, so detail beyond the next slice costs review rounds and buys nothing. Execution choices belong to the campaign coordinator, who repairs inside the approved scope and escalates only a changed outcome, architecture, authority, material cost or scope.
 
 ## Phase 0: ground the request
 
-1. **Search memory before files:** use an available memory or recall tool to find the prior specification, plan and decisions. Search prior plans and decision documents when recall is unavailable. Read harness and dispatch rules directly.
-2. **Read the scope source yourself:** follow the prior specification and its decision register. Treat a specification older than the repository as a hypothesis until the current code confirms it.
-3. Read tracker state once in every affected repository. Use `pinax status --json` on a [Pinax](https://github.com/antikas/pinax-tracker) repository; otherwise read the supported backlog file. Confirm that the request is still unexecuted and identify existing items that affect its order.
+1. **Search memory before files:** use an available memory or recall tool to find the prior specification, plan and decisions; search prior plans and decision documents when recall is unavailable.
+2. **Read the scope source yourself.** Treat a specification older than the repository as a hypothesis until the current code confirms it.
+3. Read tracker state once in every affected repository (`pinax status --json` on a [Pinax](https://github.com/antikas/pinax-tracker) repository, otherwise the supported backlog file). Confirm the request is still unexecuted and note existing items that affect its order.
 
-## Phase 1: inspect each affected surface
+## Phase 1: inspect, then probe
 
-Read small surfaces yourself. Use one scout per surface that is too wide to read directly, in parallel when the host supports it, with structured output and per-answer file evidence. Pin the implementation-capable model tier available in the current host. Standard surfaces:
-- **the build repositories:** compare the documented extension method with the latest implementation. Inspect coupling checks, test lanes, the declared validator, deployment code, repository drift, and pinned upstream data.
-- **every publication surface** implied by "end to end": inspect its structure, the files one new entry changes, and its deployment state.
-- **the programme docs:** open decisions and named gates touching the ask; what has been executed since the spec was written.
+**Inspect.** Read small surfaces yourself. Use one scout per surface too wide to read directly, in parallel when the host supports it, with structured output and per-answer file evidence, at the implementation-capable model tier. Cover the build repositories (extension method against the latest implementation, test lanes, the declared validator, deployment code, drift), every publication surface the request implies, and the open decisions and gates touching the ask. Ask scouts to report contradictions in the request's assumptions.
 
-Ask scouts to report contradictions in the request's assumptions. The author reads the pivotal decisions and latest review precedent directly. Scouts may summarise supporting sources.
+**Probe.** Before writing any detail, run the riskiest real step once: the command, installation, build or user journey the next slice depends on that nobody has seen work in this repository. Probe in a scratch copy, a fresh clone or throwaway worktree under the scratch root. A probe changes nothing shared: no commits, no tracker writes, no sync of a shared environment, no start or stop of a shared service. Record the command, the result and its consequence in the plan. A failing probe is the most useful result planning produces: its fix becomes the first item.
 
 ## Phase 2: write the plan
 
-Create one plan at `plans/<date>-<slug>/plan.md` in the team's shared planning repository or the target repository's `docs/plans/` directory. Use this structure:
+Write `plans/<date>-<slug>/plan.md` in the team's planning repository, or `docs/plans/` in the target repository.
 
-1. **Current position:** give a plain English summary that a new reader can follow.
-2. **Mandate:** state the owner's request and the gates that authorise activation and launch.
-3. **Changes since the source specification:** number each evidenced change and explain its effect. Link to the specification as the scope source.
-4. **Decision table:** give reversible decisions a named default, precedent and override window. Register open or irreversible decisions as blocked owner gates. Keep content that needs a named approver in draft when precedent exists; otherwise park it.
-5. **Queue:** give each item its scope source, change notes, lane, dependencies and testable acceptance criteria. Set each item's `Item nature` and `## Declared paths` so triage can classify it before a claim. Cover build, go-live preparation, blocked production deployment, publication updates, and blocked publication. State the park path for any item that needs a person or production access during its cycle.
-6. **Dependency graph:** show the item order and how the new queue fits the existing queue.
-7. **AutoBuild configuration:** name the invocation, builder and reviewer models, validator, gate types and observation settings.
-8. **Constraints and measurable success criteria:** include the live result, publication surface, visible deferrals, and the record for each autonomous decision.
+1. **Decision brief**, 500 to 700 words as a usability target: outcome with a concrete example; the current position in plain English; scope; decisions and authority; uncertainty and the probe result; the next slice and its dependencies; acceptance evidence and rollback.
+2. **Owner inputs**, in one block: each default the owner may override, with its precedent; each disposition, closure or baseline only the owner can give; each physical act only the owner can perform. The owner answers the block once, with the launch instruction. A missing input ships labelled as missing, with only the claim that depends on it withheld. It never becomes a later question.
+3. **Next slice**, every item in full: scope source, lane, dependencies, `Item nature`, `## Declared paths`, acceptance and stop condition. Acceptance makes a wrong answer fail: independent expected values, both case classes, a tolerance fixed now. A measurement names the task, the start and end boundaries and the unit on both sides. Where one item produces a value another consumes, name the connecting piece and its end-to-end proof. Scoped checks run per item; full acceptance runs at the slice boundary and is never repeated on unchanged evidence.
+4. **Later items**, one line each, in order, with their dependencies, through go-live preparation, production deployment and publication, so the whole road stays visible.
+5. **Configuration:** the profile (models, efforts, validator), the campaign environment, and the coordinator work the slice needs before or between items (environment setup, machine changes, other repositories).
 
-## Phase 3: run the independent review
+Before review, check the plan against itself: the registration list equals the next slice plus the later lines; the order respects every dependency; no item needs something a later item creates; every gate names who releases it and on what evidence; the owner-input block is complete. Cut anything that is not the brief, the inputs, the next slice, the later lines or the configuration.
 
-Use four fresh reviewer sessions and run them in parallel when the host supports it. Give them the plan, sources, repositories and AutoBuild contract by file path. Keep the author's narration outside the review.
+## Phase 3: one independent review
 
-1. **Coverage and dependencies:** check the complete mandate and the real item order.
-2. **Autobuildability:** check unattended execution, gate types, validator choice, lanes and item size.
-3. **Architecture and source ownership:** check repository claims against code, reuse existing patterns and prevent duplicate sources of truth.
-4. **Premortem:** describe how the plan could cause production damage, user harm, cross-repository failure, a costly decision or a failed run.
+One fresh reviewer at the review tier reads the plan from disk with its sources, the repositories and the AutoBuild contract by path, without the author's narration. It reviews the next slice for four things: the mandate is covered by the slice or a later line; the slice can run as written (order, gates, validator, item size, environment); repository claims match the code and nothing duplicates an existing source of truth; and how the slice could damage production, a user, another repository or the run. A slice that crosses repositories or touches a specialist boundary may add one named specialist reviewer; that is an exception the plan states, not a default.
 
-Each seat returns `PASS`, `PASS_WITH_FOLDS`, or `FAIL`. It lists file-backed blockers, direct folds and the claims it checked. Verify every blocker against the code, apply accepted folds, and repeat failed reviews with fresh seats. Stop after three review rounds without a PASS or PASS_WITH_FOLDS and bring the open blockers to the owner. Record every round in `review-verdict.md` beside the plan.
+The reviewer returns `PASS`, `PASS_WITH_FOLDS` or `FAIL`. A blocker names the acceptance criterion it violates, a defect in the code, or a consequential risk, with evidence. Everything else is advisory; the author records, schedules or dismisses it with a reason. The author verifies each blocker against the code, corrects the plan, and sends only the corrected parts to a fresh reviewer. Three rounds are the limit: after the third, the open blockers go to the owner with the plan. Record each round in `review-verdict.md` beside the plan.
 
-## Phase 4: register the queue and stop
+## Phase 4: register and stop
 
-Only after PASS / PASS_WITH_FOLDS-with-folds-applied:
-1. Register the queue in each repo's tracker in dependency order. Use `pinax add` on a Pinax repo. Otherwise add rows to the supported `BACKLOG.md` table with a `Ready` status and a brief reference, following `../../docs/running-autobuild.md`. Acceptance belongs in the brief, with the plan and spec named as its sources. Every brief carries an `Item nature` line (`repository`, `machine`, `cross-repository`, or `owner-gated`) and a `## Declared paths` section listing every path the item edits; AutoBuild reads both at claim without a model call. Owner-gated Pinax items get their gate typed **at registration** (`pinax block <id> --gate decision`); owner-gated backlog rows use `Blocked`, never `Ready`. Register `machine` and `cross-repository` items as blocked with a decision gate the same way, because a fenced builder cannot touch a machine or a path outside the repository; a person handles them outside the run. Registration commits ride the default branch (register-before-branch invariant).
-2. Hygiene: index the plan folder wherever the project indexes plans, and record any durable lesson where the project keeps them.
-3. **Report and stop.** Give the owner the plain English plan summary, verdict, decisions and override windows, open gates, and launch command. Wait for the owner's launch instruction.
+1. Register the next slice in each repository's tracker in dependency order, with briefs as `../../docs/running-autobuild.md` describes. Every brief carries `Item nature` and `## Declared paths`; AutoBuild reads both at claim without a model call.
+2. Register each later line as one item, blocked with gate `scope` (or `Blocked` in `BACKLOG.md`), its brief a pointer to its line in the plan.
+3. Owner gates (`pinax block <id> --gate decision`, or `Blocked`) are only for genuine owner decisions and owner acts: a strategic or irreversible choice, a public release, a production deployment, a physical act the agent cannot perform.
+4. `machine` and `cross-repository` items are the coordinator's work, done in the attended setup window or between items. Register them blocked so the application never claims them, because a fenced worktree cannot reach a machine or another repository, and name the coordinator and the evidence in the release clause. They are never questions for the owner.
+5. Registration commits ride the default branch. Index the plan folder where the project indexes plans, and record any durable lesson where the project keeps them.
+6. **Report and stop.** Give the owner the brief, the probe result, the verdict, the owner-input block and the launch command. One reply from the owner answers the inputs and gives the launch instruction.
 
 ## Acceptance criteria
 
-- Memory or focused search found the request's prior material. The plan links to the scope source and keeps each fact there.
-- Every open decision has a precedent-backed default and override window, or a registered blocked gate. The plan contains no silent defaults or omissions.
-- The queue covers build, live operation and publication. Owner-gated steps remain visible as blocked items.
-- A four-lens blind review ran on the artefact from disk; blockers were code-verified by the adjudicator; the verdict trail lives beside the plan.
-- The tracker answers "what would the run do?" with one status call; the owner holds the launch trigger.
+- Prior material was found and the plan links to its scope source.
+- A real probe of the riskiest step ran in a scratch copy, and its result is in the plan.
+- The plan is the brief, the owner-input block, the next slice in full and one line per later item, with the road through deployment and publication visible.
+- The owner's inputs fit one reply, and no gate asks the owner something the coordinator can establish from evidence.
+- Every acceptance criterion in the next slice names the wrong answer it rejects.
+- One independent review ran on the plan from disk, blockers were verified against the code, and the verdict trail lives beside the plan.
+- The tracker answers "what would the run do?" with one status call, and the owner holds the launch trigger.

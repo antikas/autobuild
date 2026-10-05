@@ -41,6 +41,7 @@ from autobuild.domain import (
     RunEvent,
     RunRecordRef,
     Seat,
+    SeatObservation,
     SeatOutcome,
     SeatResult,
     SeatUsage,
@@ -51,7 +52,7 @@ from autobuild.domain import (
     WorktreeSnapshot,
     WorktreeStatus,
 )
-from autobuild.domain import ScopeFenceViolation
+from autobuild.domain import ClaimTaken, ScopeFenceViolation, TrackerPublication, TrackerStop
 from autobuild.enforcement import ScopedTrackerPort
 from autobuild.domain import (
     CampaignContext,
@@ -788,6 +789,64 @@ def test_report_names_shipped_parked_and_failed_items(tmp_path: Path) -> None:
     assert "progress log" in content
 
 
+def test_report_seat_rows_name_actual_lane_model_and_requested_effort() -> None:
+    ports = make_ports([], [], diff_count=0)
+    ports.tracker.queue.append(item())
+    seats = (
+        SeatObservation(
+            Seat.BUILDER,
+            "builder-class",
+            "resolved-builder",
+            SeatOutcome.SUCCEEDED,
+            0,
+            "start",
+            "end",
+            12.0,
+            3,
+            5,
+            0.2,
+            "raw:builder",
+            "",
+            lane="first",
+            effort=EffortLevel.HIGH,
+        ),
+        SeatObservation(
+            Seat.REVIEWER,
+            "reviewer-class",
+            "resolved-reviewer",
+            SeatOutcome.SUCCEEDED,
+            0,
+            "start",
+            "end",
+            None,
+            None,
+            None,
+            None,
+            "raw:reviewer",
+            "",
+            lane="second",
+        ),
+    )
+    scripted = _ScriptedItemWorkflow(
+        [ItemOutcome("item-1", ItemDisposition.ACCEPTED, (ItemState.RELEASED,), seats=seats)]
+    )
+
+    CampaignRunner(ports, items=scripted).run(campaign(), lambda selected: spec(selected))
+
+    content = ports.workspace.reports[0].content
+    assert (
+        "| item | seat | lane | model | requested effort | duration seconds | input tokens | "
+        "output tokens | cost |" in content
+    )
+    assert "| item-1 | builder | first | resolved-builder | high | 12.0 | 3 | 5 | 0.2 |" in content
+    assert "| item-1 | reviewer | second | resolved-reviewer | - | - | - | - | - |" in content
+
+    empty_ports = make_ports([], [], diff_count=0)
+    CampaignRunner(empty_ports).run(campaign(), lambda selected: spec(selected))
+
+    assert "| none | - | - | - | - | - | - | - | - |" in empty_ports.workspace.reports[0].content
+
+
 def test_a_raising_item_workflow_still_leaves_a_completed_run_record(tmp_path: Path) -> None:
     ports = make_ports([], [], diff_count=0)
     ports.tracker.queue.append(item())
@@ -1512,7 +1571,7 @@ def test_progress_sequence_for_one_accepted_and_one_parked_item() -> None:
     assert progress.lines and progress.began
     bodies = _bodies(progress)
     assert bodies == [
-        "campaign started: harness , models , up to 2 items",
+        "campaign started: harness , models , efforts none, up to 2 items",
         "item item-1 claimed: test item",
         "item item-1 seat builder succeeded",
         "item item-1 validation passed",
@@ -1582,9 +1641,14 @@ def _event(event_type: str, item_id: str | None, payload: dict[str, object]) -> 
             _event(
                 "campaign.started",
                 None,
-                {"harness": "codex", "models": {"builder": "m-b", "reviewer": "m-r"}, "item_bound": 5},
+                {
+                    "harness": "codex",
+                    "models": {"builder": "m-b", "reviewer": "m-r"},
+                    "efforts": {"builder": "high", "reviewer": None, "specialist": None},
+                    "item_bound": 5,
+                },
             ),
-            "campaign started: harness codex, models builder m-b, reviewer m-r, up to 5 items",
+            "campaign started: harness codex, models builder m-b, reviewer m-r, efforts builder high, up to 5 items",
         ),
         (_event("item.claimed", "item-1", {"title": "Do the thing"}), "item item-1 claimed: Do the thing"),
         (
@@ -1639,3 +1703,220 @@ def test_render_progress_line_is_fixed_and_timestamped(event: RunEvent, expected
     assert rendered == f"2026-09-04T12:00:00+00:00 {expected}"
     assert rendered.isascii()
     assert "/worktree" not in rendered and ":\\" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("efforts", "expected"),
+    [
+        (
+            {"builder": EffortLevel.HIGH, "reviewer": None, "specialist": None},
+            {"builder": "high", "reviewer": None, "specialist": None},
+        ),
+        (
+            {"builder": None, "reviewer": None, "specialist": None},
+            {"builder": None, "reviewer": None, "specialist": None},
+        ),
+    ],
+)
+def test_campaign_started_serializes_requested_efforts(
+    efforts: dict[str, EffortLevel | None], expected: dict[str, str | None]
+) -> None:
+    ports = make_ports([], [], diff_count=0)
+    context = CampaignContext(
+        harness="test",
+        models={"builder": "model"},
+        delivery_mode=DeliveryMode.PROTECTED_DEFAULT,
+        validator_id="tests",
+        target_branch="main",
+        target_revision="base",
+        efforts=efforts,
+    )
+
+    CampaignRunner(ports).run(campaign(), lambda selected: spec(selected), context=context)
+
+    started = next(event for event in ports.records.events if event.event_type == "campaign.started")
+    assert started.payload["efforts"] == expected
+
+
+def test_campaign_context_keeps_old_positional_optional_fields_with_keyword_efforts() -> None:
+    ports = make_ports([], [], diff_count=0)
+    surface = LeaseSurface(Path("/repo/.ergon"), SurfaceKind.TRACKER)
+    context = CampaignContext(
+        "test",
+        {"builder": "model"},
+        DeliveryMode.PROTECTED_DEFAULT,
+        "tests",
+        "main",
+        "base",
+        True,
+        True,
+        surface,
+        efforts={"builder": EffortLevel.HIGH, "reviewer": None, "specialist": None},
+    )
+
+    CampaignRunner(ports).run(campaign(), lambda selected: spec(selected), context=context)
+
+    assert context.push_current_branch is True
+    assert context.allow_current_branch_default is True
+    assert context.tracker_surface == surface
+    started = next(event for event in ports.records.events if event.event_type == "campaign.started")
+    assert started.payload["efforts"] == {
+        "builder": "high",
+        "reviewer": None,
+        "specialist": None,
+    }
+
+
+# --- Tracker claim taken and tracker stops ---------------------------------------
+
+
+def test_a_claim_taken_by_another_writer_selects_the_next_item() -> None:
+    ports = make_ports(
+        [builder("b2"), verdict_result("item-2", ReviewDecision.PASS, "2")],
+        [command(suffix="2")],
+        diff_count=1,
+    )
+    second = WorkItem("item-2", "second", "plan", ("passes",))
+    ports.tracker.queue.append(item())
+    ports.tracker.ready.extend([item(), second])
+    ports.tracker.claim_errors["item-1"] = ClaimTaken("item-1", "superseded")
+
+    outcome = CampaignRunner(ports).run(campaign(max_items=2), lambda selected: spec(selected))
+
+    assert [entry.item_id for entry in outcome.items] == ["item-2"]
+    assert outcome.items[0].disposition is ItemDisposition.ACCEPTED
+    assert outcome.stop_reason is CampaignStopReason.QUEUE_DRY
+    assert [item_id for item_id, _ in ports.tracker.claims] == ["item-2"]
+    assert ports.workspace.created == ["item-2"]
+    taken = [event for event in ports.records.events if event.event_type == "item.claim_taken"]
+    assert [event.item_id for event in taken] == ["item-1"]
+    assert render_progress_line(taken[0]).endswith("selecting the next item")
+
+
+@pytest.mark.parametrize(
+    ("environment", "code", "reason"),
+    (
+        (True, 4, CampaignStopReason.TRACKER_ENVIRONMENT),
+        (True, None, CampaignStopReason.TRACKER_ENVIRONMENT),
+        (False, 1, CampaignStopReason.TRACKER_REFUSED),
+        (False, 2, CampaignStopReason.TRACKER_REFUSED),
+        (False, 5, CampaignStopReason.TRACKER_REFUSED),
+        (False, 6, CampaignStopReason.TRACKER_REFUSED),
+        (False, 7, CampaignStopReason.TRACKER_REFUSED),
+    ),
+)
+def test_a_tracker_stop_on_claim_stops_the_campaign_with_the_code_and_message(
+    environment: bool, code: int | None, reason: CampaignStopReason
+) -> None:
+    ports = make_ports([], [], diff_count=0)
+    ports.tracker.queue.extend([item(), WorkItem("item-2", "second", "plan", ("passes",))])
+    message = f"pinax claim exit {code}: tracker message"
+    ports.tracker.claim_errors["item-1"] = TrackerStop(message, code=code, environment=environment)
+
+    outcome = CampaignRunner(ports).run(campaign(max_items=2), lambda selected: spec(selected))
+
+    assert outcome.stop_reason is reason
+    assert [entry.item_id for entry in outcome.items] == ["item-1"]
+    assert outcome.items[0].disposition is ItemDisposition.FAILED
+    assert outcome.items[0].reason == message
+    assert ports.tracker.claims == []
+    assert ports.tracker.parked == []
+    assert ports.workspace.created == []
+    stopped = next(
+        event for event in ports.records.events if event.event_type == "campaign.tracker_stopped"
+    )
+    assert stopped.payload == {"stop_reason": reason.value, "exit_code": code, "error": message}
+
+
+def test_a_tracker_stop_on_close_keeps_the_worktree_and_never_parks() -> None:
+    class _CloseRefusingTracker(FakeTrackerAdapter):
+        def close(self, evidence, item_commit, workspace, actor):
+            raise TrackerStop("pinax done exit 5: push rejected", code=5, environment=False)
+
+    ports = make_ports([builder(), review(ReviewDecision.PASS)], [command()], diff_count=1)
+    ports = WorkflowPorts(
+        _CloseRefusingTracker(identity("tracker")),
+        ports.workspace,
+        ports.harness,
+        ports.command,
+        ports.records,
+        ports.knowledge,
+        lease=ports.lease,
+    )
+    ports.tracker.queue.extend([item(), WorkItem("item-2", "second", "plan", ("passes",))])
+
+    outcome = CampaignRunner(ports).run(campaign(max_items=2), lambda selected: spec(selected))
+
+    assert outcome.stop_reason is CampaignStopReason.TRACKER_REFUSED
+    assert [entry.item_id for entry in outcome.items] == ["item-1"]
+    assert "exit 5" in (outcome.items[0].reason or "")
+    assert ports.tracker.parked == []
+    assert ports.workspace.released == []
+    assert [item_id for item_id, _ in ports.tracker.claims] == ["item-1"]
+    states = outcome.items[0].states
+    assert states[-1] is ItemState.REVIEWED
+    assert ItemState.CLAIMED in states
+    assert _worktree_surfaces(ports) == [(SurfaceKind.WORKTREE, Path("/worktree"))]
+
+
+def test_unpublished_tracker_writes_are_recorded_in_progress_and_report() -> None:
+    note = "pinax: the push was refused because feature is not the origin default branch main"
+    ports = make_ports([builder(), review(ReviewDecision.PASS)], [command()], diff_count=1)
+    ports.tracker.publication = TrackerPublication(False, note)
+    ports.tracker.queue.append(item())
+
+    outcome = CampaignRunner(ports).run(
+        campaign(refill_enabled=True, max_items=2),
+        lambda selected: spec(selected),
+        refill=RefillPlan(
+            (Proposal("Candidate", "What next?", "Queue is dry", "docs/candidate.md"),), ()
+        ),
+    )
+
+    assert outcome.stop_reason is CampaignStopReason.QUEUE_DRY
+    assert outcome.items[0].disposition is ItemDisposition.ACCEPTED
+    unpublished = [
+        event for event in ports.records.events if event.event_type == "tracker.unpublished"
+    ]
+    assert [(event.item_id, event.payload["operation"]) for event in unpublished] == [
+        ("item-1", "claim"),
+        ("proposal-1", "proposal"),
+    ]
+    assert all(event.payload["note"] == note for event in unpublished)
+    assert "committed and not yet published" in render_progress_line(unpublished[0])
+    report = ports.workspace.reports[0].content
+    assert "## Unpublished tracker writes" in report
+    assert "- item-1 claim" in report and "- proposal-1 proposal" in report
+
+
+def test_published_tracker_writes_add_no_unpublished_record() -> None:
+    ports = make_ports([builder(), review(ReviewDecision.PASS)], [command()], diff_count=1)
+    ports.tracker.queue.append(item())
+
+    CampaignRunner(ports).run(campaign(), lambda selected: spec(selected))
+
+    assert not any(event.event_type == "tracker.unpublished" for event in ports.records.events)
+    assert "Unpublished tracker writes" not in ports.workspace.reports[0].content
+
+
+def test_an_unpublished_lane_re_claim_is_recorded_like_the_first_claim() -> None:
+    ports, _state = lane_ports(
+        [failed_builder("one")],
+        [builder("two"), review(ReviewDecision.PASS)],
+        [command()],
+        diff_count=1,
+        one_signal=LaneSignal(LaneSignalKind.RATE_LIMIT),
+    )
+    ports.tracker.publication = TrackerPublication(False, "committed on the pull request branch")
+
+    outcome = ItemWorkflow(ports).run(campaign(), spec(), ports.records.create(campaign()))
+
+    assert outcome.disposition is ItemDisposition.ACCEPTED
+    positions = [
+        index
+        for index, event in enumerate(ports.records.events)
+        if event.event_type == "tracker.unpublished" and event.payload["operation"] == "claim"
+    ]
+    assert len(positions) == 2
+    changed = [event.event_type for event in ports.records.events].index("item.lane_changed")
+    assert positions[0] < changed < positions[1]

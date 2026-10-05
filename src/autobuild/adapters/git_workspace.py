@@ -33,6 +33,7 @@ from autobuild.domain import (
     WorktreeSnapshot,
     WorktreeStatus,
 )
+from autobuild.adapters.tracker_commits import require_one_tracker_commit
 
 
 def _slug(value: str) -> str:
@@ -52,9 +53,11 @@ class GitWorkspaceAdapter:
         scratch_root: Path,
         remote: str = "origin",
         tracker_paths: tuple[Path | str, ...] = (".ergon",),
+        tracker_commits_itself: bool = False,
     ) -> None:
         self._scratch_root = scratch_root.resolve(strict=False)
         self._remote = remote
+        self._tracker_commits_itself = tracker_commits_itself
         self._tracker_paths = tuple(
             Path(path).as_posix().strip("/") for path in tracker_paths
         )
@@ -281,6 +284,11 @@ class GitWorkspaceAdapter:
         self, workspace: WorkspaceRef, item_id: str, item_commit: str | None
     ) -> str:
         self._require_lease(workspace)
+        if self._tracker_commits_itself:
+            base = item_commit if item_commit is not None else workspace.start_commit
+            return require_one_tracker_commit(
+                self._git, workspace.root, base, self._tracker_paths
+            )
         head = self._git(workspace.root, "rev-parse", "HEAD")
         if item_commit is not None and head != item_commit:
             raise EvidenceError("tracker close is not immediately after the item commit")

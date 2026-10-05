@@ -1,4 +1,5 @@
-"""Pinax tracker adapter with committed claim, close, park and proposal state."""
+"""Pinax tracker adapter. Pinax commits every mutation itself and publishes it
+from the checked-out remote default branch."""
 
 from __future__ import annotations
 
@@ -15,28 +16,51 @@ from autobuild.domain import (
     AdapterIdentity,
     CampaignRef,
     ClaimReceipt,
+    ClaimTaken,
     CloseEvidence,
     EvidenceError,
     ProbeResult,
     Proposal,
     ProposalRef,
+    TrackerPublication,
+    TrackerStop,
     WorkItem,
     WorkspaceRef,
 )
+from autobuild.adapters.tracker_commits import (
+    head_on_remote,
+    require_committed,
+    require_no_foreign_changes,
+)
+
+_TRACKER_PATHS = (".ergon",)
+
+# Pinax exit codes for a mutating command. 0 is committed and 3 on a claim is
+# a superseded claim; both are handled by the adapter. 4 is an environment
+# stop and the rest are refusals; every stop carries Pinax's own explanation.
+_ENVIRONMENT_EXITS = frozenset({4})
+_REFUSED_EXITS = frozenset({1, 2, 5, 6, 7})
 
 
 class PinaxTrackerAdapter:
+    # Pinax commits every mutation itself; the workspace adapter verifies the
+    # tracker commit instead of creating one.
+    commits_itself = True
+
     def __init__(
         self,
         repository: Path,
         proposal_prefix: str = "abp",
-        remote: str = "origin",
-        push_primary: bool = True,
+        accept_unpublished_claims: bool = False,
     ) -> None:
+        """``accept_unpublished_claims`` accepts a claim Pinax committed but
+        did not publish because the checked-out branch is not the remote
+        default branch; the claim then travels with the branch's pull request.
+        Every other unpublished claim stops the campaign."""
+
         self._repository = repository.resolve(strict=False)
         self._proposal_prefix = proposal_prefix
-        self._remote = remote
-        self._push_primary = push_primary
+        self._accept_unpublished_claims = accept_unpublished_claims
 
     def probe(self) -> ProbeResult:
         executable = shutil.which("pinax")
@@ -62,7 +86,7 @@ class PinaxTrackerAdapter:
         root = campaign.repository.resolve(strict=False)
         if root != self._repository:
             raise AdapterError("campaign repository does not match the bound Pinax repository")
-        completed = self._run(root, "next", "--actor", "coordinator@autobuild", "--json", check=False)
+        completed = self._run(root, "next", "--actor", "coordinator@autobuild", "--json")
         if completed.returncode != 0:
             combined = f"{completed.stdout}\n{completed.stderr}".casefold()
             if "no ready" in combined or "queue" in combined and "empty" in combined:
@@ -88,7 +112,7 @@ class PinaxTrackerAdapter:
         if root != self._repository:
             raise AdapterError("campaign repository does not match the bound Pinax repository")
         completed = self._run(
-            root, "ready", "--actor", "coordinator@autobuild", "--json", check=False
+            root, "ready", "--actor", "coordinator@autobuild", "--json"
         )
         if completed.returncode != 0:
             combined = f"{completed.stdout}\n{completed.stderr}".casefold()
@@ -199,9 +223,16 @@ class PinaxTrackerAdapter:
             self._repository, "status", "--porcelain", "--untracked-files=all"
         ).strip():
             raise AdapterError("primary checkout must be clean before a tracker claim")
-        self._json(self._repository, "claim", item.item_id, "--actor", actor, "--json")
-        self._commit_primary(f"MODIFIED: claim {item.item_id} in Pinax")
-        return ClaimReceipt(item.item_id, actor, datetime.now(UTC).isoformat())
+        _, publication = self._mutate(
+            self._repository, "claim", item.item_id, "--actor", actor, "--json"
+        )
+        return ClaimReceipt(
+            item.item_id,
+            actor,
+            datetime.now(UTC).isoformat(),
+            published=publication.published,
+            publication_note=publication.note,
+        )
 
     def close(
         self,
@@ -213,7 +244,7 @@ class PinaxTrackerAdapter:
         briefing = workspace.root / f".autobuild-{evidence.item_id}-briefing.md"
         briefing.write_text(self._briefing(evidence, item_commit), encoding="utf-8")
         try:
-            self._json(
+            self._mutate(
                 workspace.root,
                 "done",
                 evidence.item_id,
@@ -228,15 +259,22 @@ class PinaxTrackerAdapter:
 
     def park(
         self, item_id: str, reason: str, actor: str, workspace: WorkspaceRef | None = None
-    ) -> None:
-        root = workspace.root if workspace is not None else self._repository
-        self._json(root, "park", item_id, "--reason", reason, "--actor", actor, "--json")
-        if workspace is None:
-            self._commit_primary(f"MODIFIED: park {item_id} in Pinax")
+    ) -> TrackerPublication | None:
+        if workspace is not None:
+            self._mutate(
+                workspace.root, "park", item_id, "--reason", reason, "--actor", actor, "--json"
+            )
+            return None
+        require_no_foreign_changes(self._git, self._repository, _TRACKER_PATHS)
+        _, publication = self._mutate(
+            self._repository, "park", item_id, "--reason", reason, "--actor", actor, "--json"
+        )
+        return publication
 
     def propose(self, proposal: Proposal, actor: str) -> ProposalRef:
         self.validate_proposal(proposal)
-        created = self._json(
+        require_no_foreign_changes(self._git, self._repository, _TRACKER_PATHS)
+        created, added = self._mutate(
             self._repository,
             "add",
             "--title",
@@ -251,7 +289,7 @@ class PinaxTrackerAdapter:
         proposal_id = str(created.get("item_id") or created.get("id") or "")
         if not proposal_id:
             raise AdapterError("pinax add did not return a proposal id")
-        self._json(
+        _, blocked = self._mutate(
             self._repository,
             "block",
             proposal_id,
@@ -262,7 +300,7 @@ class PinaxTrackerAdapter:
             "--json",
         )
         caption = f"{proposal.question} {proposal.rationale}"[:200]
-        self._json(
+        _, noted = self._mutate(
             self._repository,
             "note",
             "add",
@@ -275,8 +313,13 @@ class PinaxTrackerAdapter:
             actor,
             "--json",
         )
-        self._commit_primary(f"ADDED: propose {proposal.title} in Pinax")
-        return ProposalRef(proposal_id, runnable=False)
+        writes = (added, blocked, noted)
+        return ProposalRef(
+            proposal_id,
+            runnable=False,
+            published=all(write.published for write in writes),
+            publication_note=next((write.note for write in writes if not write.published), ""),
+        )
 
     @staticmethod
     def validate_proposal(proposal: Proposal) -> None:
@@ -335,46 +378,80 @@ class PinaxTrackerAdapter:
             f"## Changed paths\n\n{changed or '- None'}\n"
         )
 
-    def _commit_primary(self, message: str) -> str:
-        status = self._git(self._repository, "status", "--porcelain", "--untracked-files=all")
-        non_tracker = [line for line in status.splitlines() if not self._tracker_status_line(line)]
-        if non_tracker:
-            raise AdapterError("primary checkout has non-tracker changes; refusing tracker commit")
-        if not status.strip():
-            raise EvidenceError("Pinax command produced no tracker state to commit")
-        self._git(self._repository, "add", "-A", "--", ".ergon")
-        self._git(self._repository, "commit", "-m", message, "--", ".ergon")
-        revision = self._git(self._repository, "rev-parse", "HEAD")
-        if not self._push_primary:
-            return revision
-        self._git(self._repository, "push", self._remote, "HEAD")
-        branch = self._git(self._repository, "branch", "--show-current")
-        remote_line = self._git(
-            self._repository, "ls-remote", self._remote, f"refs/heads/{branch}"
+    def _mutate(
+        self, root: Path, *args: str
+    ) -> tuple[dict[str, object], TrackerPublication]:
+        """Run one mutating Pinax command and confirm it committed its event.
+
+        Pinax appends, commits and, on the checked-out remote default branch,
+        pushes in the one command, so the adapter never stages or commits
+        tracker files. A nonzero exit is mapped to a typed stop that carries
+        Pinax's own report. Returns the command's JSON and its publication."""
+
+        command = args[0]
+        before = self._git(root, "rev-parse", "HEAD")
+        completed = self._run(root, *args)
+        code = completed.returncode
+        report = self._last_json(completed.stdout)
+        notes = completed.stderr.strip()
+        cause = "; ".join(
+            part for part in (str(report.get("message", "")).strip(), notes) if part
+        ) or completed.stdout.strip()
+        if code == 3 and command == "claim":
+            raise ClaimTaken(args[1], cause or "claim superseded")
+        if code == 4 and command == "claim" and self._branch_local_claim(report):
+            require_committed(self._git, root, before, _TRACKER_PATHS)
+            return report, TrackerPublication(False, cause)
+        status = str(report.get("status", "")).strip()
+        label = f"pinax {command} exit {code}" + (f" ({status})" if status else "")
+        if code in _ENVIRONMENT_EXITS:
+            raise TrackerStop(f"{label}: {cause}", code=code, environment=True)
+        if code in _REFUSED_EXITS:
+            raise TrackerStop(f"{label}: {cause}", code=code, environment=False)
+        if code != 0:
+            raise AdapterError(f"{label}: {cause}")
+        require_committed(self._git, root, before, _TRACKER_PATHS)
+        payload = self._parse(command, completed.stdout)
+        pushed = payload.get("pushed")
+        published = pushed if isinstance(pushed, bool) else head_on_remote(self._git, root)
+        return payload, TrackerPublication(published, "" if published else notes)
+
+    def _branch_local_claim(self, report: dict[str, object]) -> bool:
+        """A claim Pinax committed and did not push only because the checked-out
+        branch is not the remote default branch, in a mode that accepts it."""
+
+        head_branch = str(report.get("head_branch") or "")
+        return (
+            self._accept_unpublished_claims
+            and report.get("status") == "committed_local"
+            and report.get("committed") is True
+            and bool(head_branch)
+            and head_branch != str(report.get("remote_branch") or "")
         )
-        remote_revision = remote_line.split()[0] if remote_line.split() else ""
-        if remote_revision != revision:
-            raise AdapterError("remote verification did not observe the tracker commit")
-        return revision
 
     @staticmethod
-    def _tracker_status_line(line: str) -> bool:
-        path = line[3:].replace("\\", "/")
-        return path == ".ergon" or path.startswith(".ergon/")
+    def _last_json(stdout: str) -> dict[str, object]:
+        for line in reversed(stdout.strip().splitlines()):
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            return payload if isinstance(payload, dict) else {}
+        return {}
 
-    def _json(self, root: Path, *args: str) -> dict[str, object]:
-        completed = self._run(root, *args)
+    @staticmethod
+    def _parse(command: str, stdout: str) -> dict[str, object]:
         try:
-            payload = json.loads(completed.stdout)
+            payload = json.loads(stdout)
         except json.JSONDecodeError as exc:
-            raise AdapterError(f"pinax returned invalid JSON for {args[0]}") from exc
+            raise AdapterError(f"pinax returned invalid JSON for {command}") from exc
         if not isinstance(payload, dict):
-            raise AdapterError(f"pinax returned a non-object JSON payload for {args[0]}")
+            raise AdapterError(f"pinax returned a non-object JSON payload for {command}")
         return payload
 
     @staticmethod
-    def _run(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-        completed = subprocess.run(
+    def _run(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
             ["pinax", "--root", str(root), *args],
             cwd=root,
             capture_output=True,
@@ -383,10 +460,6 @@ class PinaxTrackerAdapter:
             errors="replace",
             check=False,
         )
-        if check and completed.returncode != 0:
-            detail = completed.stderr.strip() or completed.stdout.strip()
-            raise AdapterError(f"pinax {args[0]} failed: {detail}")
-        return completed
 
     @staticmethod
     def _git(root: Path, *args: str) -> str:

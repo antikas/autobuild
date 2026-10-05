@@ -53,6 +53,9 @@ class BacklogTrackerAdapter:
     Row order is queue order. Proposed rows are deliberately non-runnable.
     """
 
+    # The workspace adapter commits the backlog change on this tracker's behalf.
+    commits_itself = False
+
     def __init__(
         self,
         repository: Path,

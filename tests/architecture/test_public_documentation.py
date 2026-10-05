@@ -4,8 +4,27 @@ import re
 import tomllib
 from pathlib import Path
 
+from autobuild.adapters.claude_harness import ClaudeCodeHarnessAdapter
+from autobuild.adapters.codex_harness import CodexHarnessAdapter
+from autobuild.adapters.copilot_harness import CopilotCliHarnessAdapter
+
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_coordinated_adapter_guides_match_harness_effort_options() -> None:
+    adapters = {
+        "claude-code.md": (ClaudeCodeHarnessAdapter, "<level>"),
+        "codex.md": (CodexHarnessAdapter, "<effort>"),
+        "github-copilot.md": (CopilotCliHarnessAdapter, "<effort>"),
+    }
+
+    for guide_name, (adapter, placeholder) in adapters.items():
+        effort_option = " ".join(adapter._effort_option(None, placeholder))
+        guide = (ROOT / "skills" / "autobuild-coordinated" / "adapters" / guide_name).read_text(
+            encoding="utf-8"
+        )
+        assert effort_option in guide
 
 
 def public_paths() -> frozenset[str] | None:
@@ -164,3 +183,33 @@ def test_pinax_mentions_point_to_the_public_repository() -> None:
         ROOT / "skills" / "autobuild-plan" / "SKILL.md",
     ):
         assert public_url in path.read_text(encoding="utf-8"), path.relative_to(ROOT)
+
+
+def test_tracker_commit_hand_over_is_documented_where_coordinators_and_operators_read() -> None:
+    skill_root = ROOT / "skills" / "autobuild-coordinated"
+    skill = (skill_root / "SKILL.md").read_text(encoding="utf-8")
+    rules = (skill_root / "rules.md").read_text(encoding="utf-8")
+    guide = (ROOT / "docs" / "running-autobuild.md").read_text(encoding="utf-8")
+    steps = {line.split(".", 1)[0]: line for line in skill.splitlines() if line[:2] in {"1.", "9."}}
+    tracker_section = skill.split("## Tracker commands", 1)[1].split("\n## ", 1)[0]
+
+    assert "never commits `.ergon` by hand" in steps["1"]
+    assert "the claim is accepted and published with the pull request" in steps["1"]
+    assert "not visible to other machines until it merges" in tracker_section
+    assert "states the cause Pinax reports" in tracker_section
+    assert "On `BACKLOG.md`, mark the item in progress and commit the change" in steps["1"]
+    assert "Pinax commits the close itself" in steps["9"]
+    assert "On `BACKLOG.md`, set the row to `Done (<commit>)` and commit" in steps["9"]
+    assert "Pinax 0.2.1 or later commits every mutating command itself" in tracker_section
+    assert "never stages or commits `.ergon` by hand" in tracker_section
+    assert "the coordinator commits the change" in tracker_section
+    assert "never stages or commits `.ergon` by hand" in rules
+    assert "A `BACKLOG.md` change is still committed by the coordinator" in rules
+    for guide_name in ("claude-code.md", "codex.md", "github-copilot.md"):
+        adapter = (skill_root / "adapters" / guide_name).read_text(encoding="utf-8")
+        assert "never commits `.ergon` by hand" in adapter
+    assert "AutoBuild 0.7.0 needs pinax-tracker 0.2.1 or later" in guide
+    assert "Do not use AutoBuild 0.6.0 or earlier with pinax-tracker 0.2.1 or later" in guide
+    assert "tracker_environment" in guide and "tracker_refused" in guide
+    assert "other machines do not see the claim until the pull request merges" in guide
+    assert "the message states the cause Pinax reported" in guide
