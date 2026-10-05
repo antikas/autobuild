@@ -6,8 +6,8 @@ Outcome: <what now exists, stated from the artefact: relations, gates, tests, do
 
 <Clauses NOT MET, each a reported stop with its registered follow-up item, or "Every acceptance clause is met.">
 
-Corrected after the blind review: <the blocker and its fix, per round>. Folded after the review: <non-blocking findings folded>. Recorded, not fixed: <owner-facing notes>.
+Finding disposition: apply the [findings and disposition rules](../rules.md#findings-and-disposition). Corrected blockers: <the blocker and its fix, per round>. Advisories: <recorded, scheduled or dismissed with reason>.
 
-Evidence: builder's validator run <exit code, suites, build lines>; blind review <rounds and verdicts>; post-merge full lane on <merge commit> <evidence line>.
+Evidence: builder's validator run <exit code, suites, build lines>; blind review <rounds and verdicts>; declared acceptance validation on the exact delivery candidate <commit> <evidence line>.
 
 Seats: <builder tier> <minutes>, <tool calls>, <validator runs>, <tokens where the runtime reports them>; <reviewer tier> <passes>, <minutes>, <tokens where reported>. Departures from the brief's command rules: <list or "none">.

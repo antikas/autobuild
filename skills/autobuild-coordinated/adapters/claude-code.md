@@ -4,11 +4,10 @@ The protocol in `SKILL.md` and `rules.md` is unchanged here. This file maps its 
 
 ## Seats
 
-- A builder, reviewer or specialist is a subagent started with the `Agent` tool: `subagent_type: autobuild-seat-<effort>`, `model` pinned from the profile table that supplies the seat's model (`[models]` in the single-lane form, the lane's `[lanes.<harness>]` table in the lane form), `run_in_background: true`. The prompt is the rendered brief from `templates/`; the agent's fresh context is the blindness guarantee.
-- Effort resolution: `<effort>` for a builder or reviewer seat is the profile's `builder_effort` or `reviewer_effort`, else `high`; for a specialist seat it is `specialist_effort`, else `reviewer_effort`, else `high`. The seat's effort comes from the same profile table that supplies its model: `[models]` in the single-lane form, or the lane's `[lanes.<harness>]` table in the lane form. Whether the model supports the level is decided by the harness at dispatch. The dispatch uses this profile effort for the seat unless the campaign record names a different effort for that item, matching `rules.md`.
+- A builder, reviewer or specialist is a subagent started with the `Agent` tool: `subagent_type: autobuild-seat-<effort>`, `model` pinned from the profile table that supplies the seat's model (`[models]` in the single-lane form, the lane's `[lanes.<harness>]` table in the lane form), `run_in_background: true`. The prompt is the rendered brief from `templates/`; the agent's fresh context is the blindness guarantee. Claude Code uses `high` when the resolved effort is unset because its seat definition must have a name.
 - Install: the five definitions under `agents/claude-code/` install to `.claude/agents/` in your home directory (user level) or the project's `.claude/agents/` (project level); when both hold a copy, the project-level one is used. The coordinator installs the definitions before the first dispatch, replacing an installed copy that differs from the shipped file; when the install creates the agents directory, the owner restarts the session before the first dispatch.
 - A correction round or a re-check continues the same seat with `SendMessage` so it keeps its context; a fresh review pass starts a new agent.
-- The application's programmatic equivalent reads the brief from standard input: `claude --print --safe-mode --no-session-persistence --permission-mode dontAsk --append-system-prompt <return contract> --session-id <uuid> --model <tier> --tools <list> --allowedTools <list> --output-format json --json-schema <schema> < <brief file>`; use it only when a seat must run outside the session, for example under a scheduler.
+- The application's programmatic equivalent reads the brief from standard input: `claude --print --safe-mode --no-session-persistence --permission-mode dontAsk --append-system-prompt <return contract> --session-id <uuid> --model <tier> --effort <level> --tools <list> --allowedTools <list> --output-format json --json-schema <schema> < <brief file>`; include `--effort <level>` only when an effort is set. Use it only when a seat must run outside the session, for example under a scheduler.
 
 ## Tool policy
 
@@ -30,4 +29,4 @@ The harness names a scratchpad directory on the system drive in every agent's sy
 
 ## Records
 
-Tracker commands are as in `SKILL.md`; the coordinator runs them in the main tree.
+Tracker commands are as in `SKILL.md`; the coordinator runs them in the main tree. Pinax 0.2.1 or later commits each command itself, so the coordinator never commits `.ergon` by hand; a `BACKLOG.md` change is committed by the coordinator.

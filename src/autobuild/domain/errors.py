@@ -30,6 +30,30 @@ class ScopeFenceViolation(PolicyViolation):
     selection fence. The campaign stops without a claim."""
 
 
+class ClaimTaken(AdapterError):
+    """The tracker published the claim and then reported it superseded by an
+    earlier claim from another writer. The item belongs to that writer; the
+    campaign selects the next item."""
+
+    def __init__(self, item_id: str, detail: str) -> None:
+        self.item_id = item_id
+        super().__init__(f"item {item_id} is taken by an earlier claim: {detail}")
+
+
+class TrackerStop(AdapterError):
+    """A tracker mutation failed in a way the campaign must not work around.
+
+    ``environment`` is true when the environment must be fixed before any
+    tracker write can succeed (an unreachable remote, a tracker that does not
+    commit its own state); otherwise the tracker refused the mutation and
+    ``code`` carries its exit code. The campaign stops either way."""
+
+    def __init__(self, message: str, *, code: int | None, environment: bool) -> None:
+        self.code = code
+        self.environment = environment
+        super().__init__(message)
+
+
 class EvidenceError(AutoBuildError):
     """Evidence is stale, incomplete, or inconsistent with the requested action."""
 

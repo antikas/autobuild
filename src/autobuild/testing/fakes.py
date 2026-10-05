@@ -41,6 +41,7 @@ from autobuild.domain import (
     SeatRequest,
     SeatResult,
     SeatUsage,
+    TrackerPublication,
     WorkItem,
     WorkspaceRef,
     WorktreeSnapshot,
@@ -103,6 +104,11 @@ class FakeTrackerAdapter(FakeAdapter):
     closed: list[CloseEvidence] = field(default_factory=list)
     parked: list[tuple[str, str]] = field(default_factory=list)
     proposals: list[Proposal] = field(default_factory=list)
+    # A scripted failure raised by ``claim`` for the named item, standing in for
+    # a tracker that reports the claim taken or stops the campaign.
+    claim_errors: dict[str, Exception] = field(default_factory=dict)
+    # The publication every claim, primary park and proposal reports.
+    publication: TrackerPublication = field(default_factory=TrackerPublication)
 
     def next_item(self, campaign: CampaignRef) -> WorkItem | None:
         return self.queue.pop(0) if self.queue else None
@@ -115,20 +121,33 @@ class FakeTrackerAdapter(FakeAdapter):
         return tuple(self.resumable)
 
     def claim(self, item: WorkItem, actor: str) -> ClaimReceipt:
+        if item.item_id in self.claim_errors:
+            raise self.claim_errors[item.item_id]
         self.claims.append((item.item_id, actor))
-        return ClaimReceipt(item.item_id, actor, "fake-time")
+        return ClaimReceipt(
+            item.item_id,
+            actor,
+            "fake-time",
+            published=self.publication.published,
+            publication_note=self.publication.note,
+        )
 
     def close(self, evidence: CloseEvidence, item_commit: str, workspace: WorkspaceRef, actor: str) -> None:
         self.closed.append(evidence)
 
     def park(
         self, item_id: str, reason: str, actor: str, workspace: WorkspaceRef | None = None
-    ) -> None:
+    ) -> TrackerPublication | None:
         self.parked.append((item_id, reason))
+        return self.publication if workspace is None else None
 
     def propose(self, proposal: Proposal, actor: str) -> ProposalRef:
         self.proposals.append(proposal)
-        return ProposalRef(f"proposal-{len(self.proposals)}")
+        return ProposalRef(
+            f"proposal-{len(self.proposals)}",
+            published=self.publication.published,
+            publication_note=self.publication.note,
+        )
 
 
 @dataclass

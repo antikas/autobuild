@@ -6,6 +6,7 @@ Each rule states the failure it prevents. A brief that departs from one names th
 
 - No history rewrite anywhere: no rebase, no force push, no branch deletion, no hard reset, no amend. Integration is by merge; a lane that must take the base branch merges it in. Rewrites prompt the harness even in permissive modes, and an unattended run stalls on the prompt.
 - Plain commands. One command per shell call, no pipelines that hide an exit code, no shell loops, no subshell retries, no here-document commit messages. A seat that needs a loop writes a script file and runs it.
+- The tracker commits itself. Pinax 0.2.1 or later commits every mutating command, so a coordinator never stages or commits `.ergon` by hand; a hand commit beside Pinax's own splits one event across two commits and breaks the close evidence chain. An earlier Pinax leaves its change uncommitted and is not supported. A `BACKLOG.md` change is still committed by the coordinator.
 - A forbidden command is a disclosure mechanism as much as a prohibition. Seats report every departure unprompted; the coordinator records each against the item. The harness-level remedy (a hook that refuses the command) belongs to the application, not the brief.
 
 ## Host artefacts
@@ -26,10 +27,19 @@ Each rule states the failure it prevents. A brief that departs from one names th
 ## Evidence
 
 - A relationship proof asserts key agreement in the store that owns the entity and is driven red with an identifier that store does not know. Counting rows off the delivering feed proves delivery, not the relationship.
-- A gate without a red proof is a finding. Every gate a builder adds or retires is proved red through a scratch copy and the real command, by the builder first and by the reviewer again.
+- A builder runs focused checks for the changed behavior. For a gate the item adds or retires, the builder preserves red evidence from a scratch copy and the real command. A changed candidate invalidates evidence for the affected claim or gate; retain the earlier red evidence and revalidate the affected evidence on the exact candidate.
+- A fresh reviewer inspects the frozen candidate and its evidence. The reviewer selectively reproduces an unresolved claim when inspection, the acceptance mapping, or the evidence leaves a material question. The reviewer does not repeat every proof, rebuild every artefact, or run the declared acceptance validation by default.
+- The coordinator runs the declared acceptance validation at the required boundary on the actual delivery candidate. This is the acceptance evidence, not a reviewer substitute.
 - A validated candidate tree carries a scratch git directory for its byte-stability checks. A projection asserts the source carries no `.git`, copies with the directory excluded, and asserts the target's remote refs still resolve afterwards.
 - A new estate, shape, translator or route with its own test needs its own validator-map rule; the first one's rule will not grow to cover it. The acceptance checklist asks for the rule and a probe on a path only that test covers.
 - Whole-tree scanning checks are selected by the directory rule, not by the file class, or a new file with a narrow rule of its own escapes them until the full lane.
+- Verification economy: scoped checks per item, targeted live proofs where behaviour changes, full deep, live and browser acceptance at integration boundaries, and no repeat on unchanged evidence.
+
+## Findings and disposition
+
+- A blocking finding names the violated acceptance criterion, an actual defect, or a consequential risk. The coordinator directs or dispatches its correction through a builder and obtains a fresh review of the affected claim before accepting that claim.
+- An advisory finding is explicitly recorded, scheduled, or dismissed with its reason. It does not reopen acceptance merely because it exists.
+- A capability-sized follow-up is a separately authorised item. A coordinator does not fold it into the delivery candidate.
 
 ## Fixtures and scope
 
@@ -39,9 +49,12 @@ Each rule states the failure it prevents. A brief that departs from one names th
 - Test runners and build tools write to the operating system's temporary directory unless told otherwise. The campaign environment file sets the temporary and cache variables, and a runner with its own base directory option (for example a test framework's base temporary path) is pointed at the scratch root explicitly; the audit catches the runner that was not.
 - A lane with no ignore file carries bytecode and build output; integration stages the item's owned paths by name, never the whole tree.
 - Stops are outcomes. An item that meets a Stop condition returns evidence and a reproducing command; the coordinator registers the gap as an item with typed edges and re-dispatches after it closes.
+- A gate with a release clause is released by the coordinator on the clause's evidence and recorded in the campaign record; it is never re-asked of the owner. The owner's inputs were collected at launch; a missing one ships labelled as missing with only the dependent claim withheld.
+- A `machine` or `cross-repository` item registered for the coordinator is done by the coordinator in the setup window or between items, recorded with its evidence, and closed; it never waits on the owner unless its release clause names an owner act.
+- Adjacent-path repair is the coordinator's inside the approved scope: amend a brief's neighbouring test or configuration paths and dispatch the fix an acceptance criterion needs, recorded against the item. A changed outcome, architecture, authority, material cost or scope escalates; nothing else does.
 
 ## Seats and tiers
 
 - Fresh seats and a blind reviewer are the mechanism, not the ceremony. A first blind review regularly finds a defect the green validator missed, often at the level of the contract. The builder's own validator run is pre-review evidence, never acceptance.
-- Design-heavy items take the review-tier model for the builder as well; mechanical items take the build tier and are corrected once each. The profile carries one builder, reviewer and specialist tier, each with an effort beside it; the coordinator raises a design-heavy item's builder to the reviewer tier, keeps the builder effort unless it records a different choice, and records the choice in the campaign record.
+- Design-heavy items take the review-tier model for the builder as well; mechanical items take the build tier and are corrected once each. The profile table that supplies a seat's model also supplies its optional effort: `builder_effort` for a builder, `reviewer_effort` for a reviewer, and `specialist_effort` for a specialist. A specialist without `specialist_effort` uses `reviewer_effort`; any other unset effort remains unset. A campaign record may name an item-level effort that overrides the profile value, and records that choice. The coordinator raises a design-heavy item's builder to the reviewer tier while keeping the resolved builder effort unless the campaign record overrides it.
 - The meter is read before every seat and after every item; the gates are recorded even when they never bind.

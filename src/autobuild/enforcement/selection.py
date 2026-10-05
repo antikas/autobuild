@@ -66,8 +66,8 @@ class ScopedTrackerPort:
 
     def park(
         self, item_id: str, reason: str, actor: str, workspace: WorkspaceRef | None = None
-    ) -> None:
-        self._port.park(item_id, reason, actor, workspace)
+    ):
+        return self._port.park(item_id, reason, actor, workspace)
 
     def propose(self, proposal: Proposal, actor: str) -> ProposalRef:
         return self._port.propose(proposal, actor)

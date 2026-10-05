@@ -103,6 +103,8 @@ class CampaignStopReason(str, Enum):
     STRUCTURAL_FAILURE = "structural_failure"
     SCOPE_FENCE_VIOLATION = "scope_fence_violation"
     LANES_EXHAUSTED = "lanes_exhausted"
+    TRACKER_ENVIRONMENT = "tracker_environment"
+    TRACKER_REFUSED = "tracker_refused"
 
 
 class LaneSignalKind(str, Enum):
@@ -259,6 +261,19 @@ class ClaimReceipt:
     item_id: str
     actor: str
     claimed_at: str
+    # False when the tracker committed the claim without publishing it to the
+    # remote; ``publication_note`` then carries the tracker's own explanation.
+    published: bool = True
+    publication_note: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class TrackerPublication:
+    """Whether a tracker write reached the shared remote, with the tracker's
+    own explanation when it did not."""
+
+    published: bool = True
+    note: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -728,6 +743,8 @@ class Proposal:
 class ProposalRef:
     proposal_id: str
     runnable: bool = False
+    published: bool = True
+    publication_note: str = ""
 
     def __post_init__(self) -> None:
         if self.runnable:
@@ -793,6 +810,10 @@ class ItemOutcome:
     # stops with the ``lanes_exhausted`` reason.
     lane_signature: str | None = None
     lanes_exhausted: bool = False
+    # Set when a tracker write stopped the campaign: the stop reason and the
+    # tracker's exit code, when it reported one.
+    tracker_stop: CampaignStopReason | None = None
+    tracker_exit_code: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -808,6 +829,7 @@ class CampaignContext:
     push_current_branch: bool = False
     allow_current_branch_default: bool = False
     tracker_surface: LeaseSurface | None = None
+    efforts: Mapping[str, EffortLevel | None] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

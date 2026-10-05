@@ -35,6 +35,7 @@ from autobuild.domain import (
     SeatRequest,
     SeatResult,
     SeatUsage,
+    TrackerPublication,
     WorkItem,
     WorkspaceRef,
     WorktreeSnapshot,
@@ -63,7 +64,12 @@ class TrackerPort(Probeable, Protocol):
     ) -> None: ...
     def park(
         self, item_id: str, reason: str, actor: str, workspace: WorkspaceRef | None = None
-    ) -> None: ...
+    ) -> TrackerPublication | None:
+        """Park the item. A tracker that publishes its own writes returns whether
+        a park from the primary checkout reached the remote; ``None`` means the
+        tracker does not publish (its change travels with delivery)."""
+        ...
+
     def propose(self, proposal: Proposal, actor: str) -> ProposalRef: ...
 
 

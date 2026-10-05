@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import json
-import subprocess
-import time
 from pathlib import Path
 
 import pytest
+from scanner_retry import run_retrying
 
 from autobuild.adapters import GitWorkspaceAdapter, PinaxTrackerAdapter
 from autobuild.domain import (
@@ -24,20 +23,8 @@ from autobuild.domain import (
 from autobuild.domain.errors import EvidenceError
 
 
-def run(*argv: str) -> str:
-    attempts = 5 if argv and argv[0] == "git" else 1
-    for attempt in range(attempts):
-        completed = subprocess.run(
-            list(argv),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
-        if completed.returncode == 0 or attempt == attempts - 1:
-            break
-        time.sleep(0.2 * (attempt + 1))
+def run(*argv: str, cwd: Path | None = None) -> str:
+    completed = run_retrying(argv, cwd=cwd)
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip()
         raise RuntimeError(f"{' '.join(argv)} failed: {detail}")
@@ -49,19 +36,7 @@ def git(root: Path, *args: str) -> str:
 
 
 def pinax(root: Path, *args: str) -> str:
-    completed = subprocess.run(
-        ["pinax", "--root", str(root), *args],
-        cwd=root,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
-    if completed.returncode != 0:
-        detail = completed.stderr.strip() or completed.stdout.strip()
-        raise RuntimeError(f"pinax {args[0]} failed: {detail}")
-    return completed.stdout.strip()
+    return run("pinax", "--root", str(root), *args, cwd=root)
 
 
 def pinax_repo(tmp_path: Path) -> tuple[Path, str]:
@@ -112,11 +87,12 @@ def pinax_repo(tmp_path: Path) -> tuple[Path, str]:
     return repo, item_id
 
 
+@pytest.mark.usefixtures("self_committing_pinax")
 def test_pinax_claim_and_close_are_delivered_as_tracker_commits(tmp_path: Path) -> None:
     repo, item_id = pinax_repo(tmp_path)
     campaign = CampaignRef("campaign", repo)
     tracker = PinaxTrackerAdapter(repo)
-    workspace_adapter = GitWorkspaceAdapter(tmp_path / "scratch")
+    workspace_adapter = GitWorkspaceAdapter(tmp_path / "scratch", tracker_commits_itself=True)
 
     item = tracker.next_item(campaign)
     assert item is not None
@@ -141,7 +117,10 @@ def test_pinax_claim_and_close_are_delivered_as_tracker_commits(tmp_path: Path) 
         workspace, FinaliseRequest(item_id, evidence, "ADDED: product")
     )
     tracker.close(evidence, item_commit, workspace, "coordinator@proof")
+    pinax_commit = git(workspace.root, "rev-parse", "HEAD")
     tracker_commit = workspace_adapter.commit_tracker(workspace, item_id, item_commit)
+    assert tracker_commit == pinax_commit
+    assert git(workspace.root, "rev-parse", f"{tracker_commit}^") == item_commit
     result = workspace_adapter.deliver(
         workspace,
         DeliveryRequest(
@@ -214,6 +193,7 @@ def test_pinax_rejects_machine_specific_proposal_references(brief_ref: str) -> N
         )
 
 
+@pytest.mark.usefixtures("self_committing_pinax")
 def test_pinax_resumable_claims_lists_builder_claimed_and_not_terminal(tmp_path: Path) -> None:
     repo, item_id = pinax_repo(tmp_path)
     campaign = CampaignRef("campaign", repo)

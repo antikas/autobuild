@@ -4,10 +4,10 @@ The protocol in `SKILL.md` and `rules.md` is unchanged here. This file maps its 
 
 ## Seats
 
-Codex has no in-session subagent tool. A fresh seat is a separate `codex exec` process started from the coordinator's shell, the same way the AutoBuild application drives its Codex harness. This command passes no effort, so a seat runs at the effort Codex is configured with, whatever the profile names:
+Codex has no in-session subagent tool. A fresh seat is a separate `codex exec` process started from the coordinator's shell, the same way the AutoBuild application drives its Codex harness. When `<effort>` is set, place the Codex effort option immediately after the model option. Omit the option when no effort is set:
 
 ```text
-codex -a never -s <workspace-write | read-only> -C <lane-path> -m <tier> exec --ephemeral --ignore-rules --json \
+codex -a never -s <workspace-write | read-only> -C <lane-path> -m <tier> -c model_reasoning_effort=<effort> exec --ephemeral --ignore-rules --json \
   --output-schema <schema-file> -o <last-message-file> - < <brief file>
 ```
 
@@ -29,4 +29,4 @@ Codex exposes plan usage in its own interface; record seat count and wall time p
 
 ## Records
 
-Tracker commands are as in `SKILL.md`; the coordinator runs them in the main tree.
+Tracker commands are as in `SKILL.md`; the coordinator runs them in the main tree. Pinax 0.2.1 or later commits each command itself, so the coordinator never commits `.ergon` by hand; a `BACKLOG.md` change is committed by the coordinator.

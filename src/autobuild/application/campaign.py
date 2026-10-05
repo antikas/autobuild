@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from autobuild.application.dependencies import WorkflowPorts
-from autobuild.application.item import ItemWorkflow
+from autobuild.application.item import COORDINATOR_ACTOR, ItemWorkflow, unpublished_write
 from autobuild.application.progress import render_progress_line
 from autobuild.domain import (
     CampaignContext,
@@ -17,6 +17,7 @@ from autobuild.domain import (
     CampaignRef,
     CampaignReport,
     CampaignStopReason,
+    ClaimTaken,
     DeliveryMode,
     ItemDisposition,
     ItemExecutionSpec,
@@ -60,6 +61,9 @@ _RESUMABLE_MARKER_STATES = frozenset(
 _DIGEST_CHECK_STATES = frozenset(
     {ItemState.BUILT.value, ItemState.VALIDATED.value, ItemState.REVIEWED.value}
 )
+_TRACKER_STOPS = frozenset(
+    {CampaignStopReason.TRACKER_ENVIRONMENT, CampaignStopReason.TRACKER_REFUSED}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,7 +75,8 @@ class _ResumeAssessment:
 class CampaignRunner:
     def __init__(self, ports: WorkflowPorts, items: ItemWorkflow | None = None) -> None:
         self._ports = ports
-        self._items = items or ItemWorkflow(ports)
+        self._unpublished: list[str] = []
+        self._items = items or ItemWorkflow(ports, self._unpublished)
 
     def run(
         self,
@@ -91,6 +96,10 @@ class CampaignRunner:
                 payload={
                     "harness": context.harness,
                     "models": dict(context.models),
+                    "efforts": {
+                        seat: effort.value if effort is not None else None
+                        for seat, effort in context.efforts.items()
+                    },
                     "item_bound": campaign.max_items,
                     "delivery_mode": context.delivery_mode.value,
                     "validator_id": context.validator_id,
@@ -103,6 +112,7 @@ class CampaignRunner:
             outcomes: list[ItemOutcome] = []
             follow_ups: list[str] = []
             parked_signatures: dict[str, str] = {}
+            taken: set[str] = set()
             stop = CampaignStopReason.QUEUE_DRY
             resumed, orphans = self._resume_interrupted(campaign, spec_for, record, context)
             outcomes.extend(resumed)
@@ -127,7 +137,9 @@ class CampaignRunner:
                     )
                     break
                 try:
-                    item = self._select_item(campaign, frozenset(parked_signatures))
+                    item = self._select_item(
+                        campaign, frozenset(parked_signatures) | frozenset(taken)
+                    )
                 except ScopeFenceViolation as exc:
                     stop = CampaignStopReason.SCOPE_FENCE_VIOLATION
                     self._append(
@@ -141,9 +153,17 @@ class CampaignRunner:
                 if item is None:
                     if campaign.refill_enabled:
                         for proposal in refill.proposals:
-                            ref = self._ports.tracker.propose(proposal, actor="coordinator")
+                            ref = self._ports.tracker.propose(proposal, actor=COORDINATOR_ACTOR)
                             if ref.runnable:
                                 raise ValueError("refill made a workflow proposal runnable")
+                            if not ref.published:
+                                self._unpublished.append(f"{ref.proposal_id} proposal")
+                                self._append(
+                                    record,
+                                    unpublished_write(
+                                        ref.proposal_id, "proposal", ref.publication_note
+                                    ),
+                                )
                             follow_ups.append(proposal.title)
                         for fog in refill.fog:
                             self._ports.knowledge.record_fog(fog)
@@ -151,6 +171,17 @@ class CampaignRunner:
                     break
                 try:
                     outcome = self._items.run(campaign, spec_for(item), record)
+                except ClaimTaken as exc:
+                    taken.add(item.item_id)
+                    self._append(
+                        record,
+                        RunEvent(
+                            event_type="item.claim_taken",
+                            item_id=item.item_id,
+                            payload={"error": str(exc)},
+                        ),
+                    )
+                    continue
                 except Exception as exc:
                     outcome = ItemOutcome(
                         item_id=item.item_id,
@@ -168,6 +199,21 @@ class CampaignRunner:
                 if outcome.lanes_exhausted:
                     stop = CampaignStopReason.LANES_EXHAUSTED
                     break
+                if outcome.tracker_stop is not None:
+                    stop = outcome.tracker_stop
+                    self._append(
+                        record,
+                        RunEvent(
+                            event_type="campaign.tracker_stopped",
+                            item_id=outcome.item_id,
+                            payload={
+                                "stop_reason": stop.value,
+                                "exit_code": outcome.tracker_exit_code,
+                                "error": outcome.reason,
+                            },
+                        ),
+                    )
+                    break
                 if outcome.structural_failure:
                     stop = CampaignStopReason.STRUCTURAL_FAILURE
                     break
@@ -175,7 +221,9 @@ class CampaignRunner:
                 if resume_stop is None:
                     stop = CampaignStopReason.ITEM_BOUND
 
-            next_ref = self._next_ready(campaign, stop, frozenset(parked_signatures))
+            next_ref = self._next_ready(
+                campaign, stop, frozenset(parked_signatures) | frozenset(taken)
+            )
             unbuilt = self._allowed_unbuilt(campaign, outcomes, stop)
             relative_report = f"docs/campaigns/{campaign.campaign_id}.md"
             repository_report_ref = self._deliver_report(
@@ -457,7 +505,10 @@ class CampaignRunner:
         left in place so nothing is lost."""
 
         try:
-            self._ports.tracker.park(item.item_id, reason, actor="coordinator")
+            publication = self._ports.tracker.park(item.item_id, reason, actor=COORDINATOR_ACTOR)
+            if publication is not None and not publication.published:
+                self._unpublished.append(f"{item.item_id} park")
+                self._append(record, unpublished_write(item.item_id, "park", publication.note))
         except Exception as exc:
             self._append(
                 record,
@@ -561,12 +612,15 @@ class CampaignRunner:
 
     @staticmethod
     def _resume_stop(resumed: list[ItemOutcome]) -> CampaignStopReason | None:
-        """A structural failure or exhausted lanes during resume stops the
-        campaign before it selects new work."""
+        """A structural failure, exhausted lanes or a tracker stop during resume
+        stops the campaign before it selects new work."""
 
         for outcome in resumed:
             if outcome.lanes_exhausted:
                 return CampaignStopReason.LANES_EXHAUSTED
+        for outcome in resumed:
+            if outcome.tracker_stop is not None:
+                return outcome.tracker_stop
         for outcome in resumed:
             if outcome.structural_failure:
                 return CampaignStopReason.STRUCTURAL_FAILURE
@@ -628,7 +682,15 @@ class CampaignRunner:
         relative: str,
     ) -> str:
         content = _render_report(
-            campaign, outcomes, next_ref, follow_ups, unbuilt, reclaims, orphans, record
+            campaign,
+            outcomes,
+            next_ref,
+            follow_ups,
+            unbuilt,
+            reclaims,
+            orphans,
+            record,
+            tuple(self._unpublished),
         )
         try:
             self._ports.workspace.deliver_report(
@@ -660,6 +722,8 @@ class CampaignRunner:
             return "scope fence violation"
         if stop is CampaignStopReason.LANES_EXHAUSTED:
             return "lanes exhausted"
+        if stop in _TRACKER_STOPS:
+            return "tracker stopped"
         try:
             peek = self._select_item(campaign, skip)
         except ScopeFenceViolation:
@@ -712,6 +776,8 @@ class CampaignRunner:
                 return "lanes exhausted"
             if stop is CampaignStopReason.STRUCTURAL_FAILURE:
                 return "structural failure"
+            if stop in _TRACKER_STOPS:
+                return "tracker stopped"
             return "item bound"
         preceding = selection.allow[:index]
         if any(
@@ -764,6 +830,7 @@ def _render_report(
     reclaims: list[LeaseRecord],
     orphans: list[tuple[str, str]],
     record: RunRecordRef,
+    unpublished: tuple[str, ...] = (),
 ) -> str:
     shipped = [o for o in outcomes if o.disposition is ItemDisposition.ACCEPTED]
     parked = [o for o in outcomes if o.disposition is ItemDisposition.PARKED]
@@ -813,6 +880,17 @@ def _render_report(
         lines.append("none")
     lines.append("")
 
+    if unpublished:
+        lines.append("## Unpublished tracker writes")
+        lines.append("")
+        lines.append(
+            "Committed and not yet published; each goes out with the next push of its branch."
+        )
+        lines.append("")
+        for entry in unpublished:
+            lines.append(f"- {entry}")
+        lines.append("")
+
     if campaign.selection.allow:
         lines.append("## Allowed items left unbuilt")
         lines.append("")
@@ -840,19 +918,24 @@ def _render_report(
 
     lines.append("## Seat usage")
     lines.append("")
-    lines.append("| item | seat | duration seconds | input tokens | output tokens | cost |")
-    lines.append("| --- | --- | --- | --- | --- | --- |")
+    lines.append(
+        "| item | seat | lane | model | requested effort | duration seconds | "
+        "input tokens | output tokens | cost |"
+    )
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     any_seat = False
     for outcome in outcomes:
         for seat in outcome.seats:
             any_seat = True
             lines.append(
-                f"| {outcome.item_id} | {seat.seat.value} | "
+                f"| {outcome.item_id} | {seat.seat.value} | {_seat_cell(seat.lane)} | "
+                f"{_seat_cell(seat.model)} | "
+                f"{_seat_cell(seat.effort.value if seat.effort is not None else None)} | "
                 f"{_seat_cell(seat.duration_seconds)} | {_seat_cell(seat.input_tokens)} | "
                 f"{_seat_cell(seat.output_tokens)} | {_seat_cell(seat.cost)} |"
             )
     if not any_seat:
-        lines.append("| none | - | - | - | - | - |")
+        lines.append("| none | - | - | - | - | - | - | - | - |")
     lines.append("")
 
     lines.append("## Run record")

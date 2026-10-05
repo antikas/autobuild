@@ -38,6 +38,7 @@ def _body(event_type: str, item_id: str, payload: Mapping[str, Any]) -> str:
         return (
             f"campaign started: harness {payload.get('harness', '')}, "
             f"models {_models(payload.get('models', {}))}, "
+            f"efforts {_efforts(payload.get('efforts', {}))}, "
             f"up to {payload.get('item_bound', '?')} items"
         )
     if event_type == "item.claimed":
@@ -70,6 +71,19 @@ def _body(event_type: str, item_id: str, payload: Mapping[str, Any]) -> str:
             f"tracker {_commit(payload.get('tracker_commit'))}, "
             f"pushed {bool(payload.get('pushed', False))}"
         )
+    if event_type == "tracker.unpublished":
+        return (
+            f"item {item_id} {payload.get('operation', '')} committed and not yet "
+            "published; it goes out with the next push of its branch"
+        )
+    if event_type == "item.claim_taken":
+        return f"item {item_id} is taken by an earlier claim; selecting the next item"
+    if event_type == "campaign.tracker_stopped":
+        code = payload.get("exit_code")
+        return (
+            f"item {item_id} stopped the campaign: {payload.get('stop_reason', '')}"
+            + (f" (tracker exit {code})" if code is not None else "")
+        )
     if event_type == "campaign.completed":
         return (
             f"{CAMPAIGN_COMPLETED_PREFIX}: shipped {payload.get('accepted', 0)}, "
@@ -82,6 +96,13 @@ def _body(event_type: str, item_id: str, payload: Mapping[str, Any]) -> str:
 
 def _models(models: Mapping[str, Any]) -> str:
     return ", ".join(f"{name} {model}" for name, model in sorted(models.items()))
+
+
+def _efforts(efforts: Mapping[str, Any]) -> str:
+    configured = [(seat, effort) for seat, effort in sorted(efforts.items()) if effort is not None]
+    if not configured:
+        return "none"
+    return ", ".join(f"{seat} {effort}" for seat, effort in configured)
 
 
 def _minutes(duration_seconds: Any) -> str:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import re
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -12,9 +14,11 @@ from autobuild.adapters import (
 )
 from autobuild.bootstrap.composition import (
     _build_lanes,
+    _lane_efforts,
     _max_seat_timeout,
     _require_lane_efforts,
     _specification,
+    _starting_lane_efforts,
     run_campaign,
 )
 from autobuild.bootstrap.environment import default_scratch_root, resolve_runs_root
@@ -22,6 +26,7 @@ from autobuild.bootstrap.profile import (
     ConfigurationError,
     LaneProfile,
     ProfileOverrides,
+    _PROFILE_ALLOWED_KEYS,
     load_settings,
 )
 from autobuild.bootstrap.registry import AdapterRegistry
@@ -467,6 +472,51 @@ def test_harness_flag_must_name_a_listed_lane(tmp_path: Path) -> None:
         load_settings(repository, args.profile, _overrides(args))
 
 
+@pytest.mark.parametrize("key", ["builder_effort", "reviewer_effort", "specialist_effort"])
+def test_an_invalid_parked_lane_effort_names_the_lane_key(tmp_path: Path, key: str) -> None:
+    profile = LANE_PROFILE + f'\n[lanes.parked]\n{key} = "turbo"\n'
+
+    with pytest.raises(ConfigurationError, match=rf"lanes\.parked\.{key} must be one of"):
+        _load(tmp_path, profile)
+
+
+@pytest.mark.parametrize("key", ["builder", "reviewer", "specialist"])
+def test_an_empty_parked_lane_model_name_is_refused(tmp_path: Path, key: str) -> None:
+    profile = LANE_PROFILE + f'\n[lanes.parked]\n{key} = ""\n'
+
+    with pytest.raises(
+        ConfigurationError, match=rf"lanes\.parked\.{key} must be a non-empty string"
+    ):
+        _load(tmp_path, profile)
+
+
+@pytest.mark.parametrize(
+    "parked_table",
+    [
+        '[lanes.parked]\nbuilder_effort = "low"\nreviewer_effort = "high"\n',
+        '[lanes.parked]\nbuilder = "builder-model"\n',
+        '[lanes.unconfigured-harness]\nbuilder = "builder-model"\n',
+    ],
+)
+def test_a_parked_lane_accepts_present_values_without_becoming_active(
+    tmp_path: Path, parked_table: str
+) -> None:
+    settings = _load(tmp_path, LANE_PROFILE + "\n" + parked_table)
+
+    assert [lane.name for lane in settings.lanes] == ["claude-code", "codex"]
+
+
+def test_harness_flag_refuses_a_parked_lane(tmp_path: Path) -> None:
+    profile = LANE_PROFILE + '\n[lanes.parked]\nbuilder = "builder-model"\n'
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (repository / ".autobuild.toml").write_text(profile, encoding="utf-8")
+    args = arguments(repository, "--harness", "parked")
+
+    with pytest.raises(ConfigurationError, match="not one of run.lanes"):
+        load_settings(repository, args.profile, _overrides(args))
+
+
 def test_single_lane_form_is_one_lane_and_defaults(tmp_path: Path) -> None:
     repository = tmp_path / "project"
     repository.mkdir()
@@ -543,6 +593,34 @@ def test_a_profile_without_effort_keys_gives_every_seat_no_effort(tmp_path: Path
     spec = _spec_for(settings)
     for seat in Seat:
         assert spec.seat_effort(seat, "codex") is None
+
+
+def test_campaign_start_efforts_preserve_unset_profile_seats(tmp_path: Path) -> None:
+    settings = _load(
+        tmp_path,
+        PROFILE.replace(
+            'reviewer = "reviewer-model"',
+            'reviewer = "reviewer-model"\nbuilder_effort = "high"',
+        ),
+    )
+
+    efforts = _starting_lane_efforts(settings, _lane_efforts(settings))
+
+    assert efforts == {
+        "builder": EffortLevel.HIGH,
+        "reviewer": None,
+        "specialist": None,
+    }
+
+
+def test_campaign_start_efforts_are_all_unset_without_profile_keys(tmp_path: Path) -> None:
+    settings = _load(tmp_path, PROFILE)
+
+    assert _starting_lane_efforts(settings, _lane_efforts(settings)) == {
+        "builder": None,
+        "reviewer": None,
+        "specialist": None,
+    }
 
 
 def test_lane_effort_keys_resolve_per_lane_and_seat(tmp_path: Path) -> None:
@@ -830,3 +908,249 @@ def test_watch_runs_root_falls_back_to_the_default_scratch_root(tmp_path: Path) 
     root = resolve_runs_root(str(repository), None, None)
 
     assert root == default_scratch_root() / "runs"
+
+
+@pytest.mark.parametrize(
+    ("table", "profile"),
+    [
+        ("run", PROFILE.replace("max_items = 7", 'max_items = 7\nunknown = "value"')),
+        (
+            "models",
+            PROFILE.replace('builder = "builder-model"', 'builder = "builder-model"\nunknown = "value"'),
+        ),
+        (
+            "validator",
+            PROFILE.replace('id = "tests"', 'id = "tests"\nunknown = "value"'),
+        ),
+        (
+            "policy",
+            PROFILE.replace(
+                'allowed_tools = ["read", "write", "shell", "python", "git"]',
+                'allowed_tools = ["read", "write", "shell", "python", "git"]\nunknown = "value"',
+            ),
+        ),
+        ("harness", PROFILE + '\n[harness]\nunknown = "value"\n'),
+        ("tracker", PROFILE + '\n[tracker]\nunknown = "value"\n'),
+        ("preflight", PROFILE + '\n[preflight]\nunknown = "value"\n'),
+        ("refill", PROFILE + '\n[refill]\nunknown = "value"\n'),
+        ("knowledge", PROFILE + '\n[knowledge]\nunknown = "value"\n'),
+        ("selection", PROFILE + '\n[selection]\nunknown = "value"\n'),
+        ("progress", PROFILE + '\n[progress]\nunknown = "value"\n'),
+        (
+            "lanes.arbitrary",
+            LANE_PROFILE + '\n[lanes.arbitrary]\nbuilder = "builder"\nreviewer = "reviewer"\nunknown = "value"\n',
+        ),
+    ],
+)
+def test_profile_refuses_unknown_fields_in_each_table(
+    tmp_path: Path, table: str, profile: str
+) -> None:
+    with pytest.raises(
+        ConfigurationError, match=rf"{re.escape(table)} contains unknown fields: unknown"
+    ):
+        _load(tmp_path, profile)
+
+
+def test_profile_refuses_all_unknown_top_level_fields_at_once(tmp_path: Path) -> None:
+    profile = 'unknown_value = "value"\n' + PROFILE + '\n[unknown_table]\nvalue = "value"\n'
+
+    with pytest.raises(
+        ConfigurationError,
+        match=r"profile contains unknown fields: unknown_table, unknown_value",
+    ):
+        _load(tmp_path, profile)
+
+
+def test_profile_refuses_all_unknown_fields_in_a_known_table_at_once(
+    tmp_path: Path,
+) -> None:
+    profile = PROFILE.replace(
+        "max_items = 7", 'max_items = 7\nunknown_a = "value"\nunknown_b = "value"'
+    )
+
+    with pytest.raises(
+        ConfigurationError,
+        match=r"run contains unknown fields: unknown_a, unknown_b",
+    ):
+        _load(tmp_path, profile)
+
+
+def test_profile_refuses_all_unknown_fields_across_known_tables_at_once(
+    tmp_path: Path,
+) -> None:
+    profile = PROFILE.replace(
+        "max_items = 7", 'max_items = 7\nunknown_run = "value"'
+    ).replace(
+        'builder = "builder-model"', 'builder = "builder-model"\nunknown_models = "value"'
+    )
+
+    with pytest.raises(
+        ConfigurationError,
+        match=r"run contains unknown fields: unknown_run; models contains unknown fields: unknown_models",
+    ):
+        _load(tmp_path, profile)
+
+
+def test_profile_refuses_a_non_table_lanes_value(tmp_path: Path) -> None:
+    with pytest.raises(ConfigurationError, match=r"\[lanes\] must be a TOML table"):
+        _load(tmp_path, 'lanes = "not-a-table"\n' + PROFILE)
+
+
+def test_profile_refuses_a_non_table_lanes_child_value(tmp_path: Path) -> None:
+    with pytest.raises(
+        ConfigurationError, match=r"\[lanes\.arbitrary\] must be a TOML table"
+    ):
+        _load(tmp_path, PROFILE + '\n[lanes]\narbitrary = "not-a-table"\n')
+
+
+def test_profile_keeps_open_item_class_and_lane_names(tmp_path: Path) -> None:
+    item_classes = _load(
+        tmp_path,
+        PROFILE + "\n[run.item_classes]\narbitrary_class = 123\n",
+    )
+    lane_root = tmp_path / "lanes"
+    lane_root.mkdir()
+    lanes = _load(
+        lane_root,
+        """
+[run]
+lanes = ["arbitrary_lane"]
+
+[lanes.arbitrary_lane]
+builder = "builder"
+reviewer = "reviewer"
+
+[models]
+builder = "ignored"
+reviewer = "ignored"
+
+[validator]
+id = "tests"
+argv = ["test"]
+""",
+    )
+
+    assert item_classes.item_classes == {"arbitrary_class": 123.0}
+    assert lanes.harness == "arbitrary_lane"
+
+
+def test_lane_profiles_keep_single_lane_fields_that_are_ignored_in_lane_mode(
+    tmp_path: Path,
+) -> None:
+    profile = (
+        LANE_PROFILE.replace(
+            'lanes = ["claude-code", "codex"]',
+            'harness = "ignored-harness"\nlanes = ["claude-code", "codex"]',
+        )
+        + '\n[models]\nbuilder = "ignored-builder"\nreviewer = "ignored-reviewer"\n'
+    )
+
+    settings = _load(tmp_path, profile)
+
+    assert settings.harness == "claude-code"
+
+
+def test_watcher_resolves_scratch_root_from_a_profile_with_an_unknown_field(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "project"
+    repository.mkdir()
+    (repository / ".autobuild.toml").write_text(
+        '[run]\nscratch_root = "scratch"\nunknown = "value"\n', encoding="utf-8"
+    )
+
+    with pytest.raises(ConfigurationError, match="run contains unknown fields: unknown"):
+        load_settings(repository, None, ProfileOverrides())
+
+    assert resolve_runs_root(str(repository), None, None) == (repository / "scratch").resolve() / "runs"
+
+
+def test_running_autobuild_toml_blocks_use_only_documented_profile_keys() -> None:
+    document = Path(__file__).parents[2] / "docs" / "running-autobuild.md"
+    blocks = re.findall(r"\x60\x60\x60toml\n(.*?)\n\x60\x60\x60", document.read_text(encoding="utf-8"), re.DOTALL)
+
+    assert blocks
+    for block in blocks:
+        profile = tomllib.loads(block)
+        assert set(profile) <= _PROFILE_ALLOWED_KEYS["profile"]
+        for table_name, table in profile.items():
+            assert isinstance(table, dict)
+            if table_name == "lanes":
+                for lane in table.values():
+                    assert isinstance(lane, dict)
+                    assert set(lane) <= _PROFILE_ALLOWED_KEYS["lanes.*"]
+            else:
+                assert set(table) <= _PROFILE_ALLOWED_KEYS[table_name]
+
+
+def test_neutral_machine_profile_forms_load_with_their_known_fields(tmp_path: Path) -> None:
+    profiles = (
+        PROFILE,
+        LANE_PROFILE
+        + """
+[models]
+builder = "ignored"
+reviewer = "ignored"
+
+[harness]
+command = ["harness"]
+""",
+        """
+[run]
+harness = "neutral"
+max_items = 1
+seat_timeout_seconds = 1
+seat_stall_seconds = 1
+lease_stale_seconds = 1
+command_timeout_seconds = 1
+scratch_root = "scratch"
+lane_state_root = "lane-state"
+lane_cool_seconds = 1
+
+[run.item_classes]
+arbitrary = 1
+
+[models]
+builder = "builder"
+reviewer = "reviewer"
+specialist = "specialist"
+builder_effort = "low"
+reviewer_effort = "medium"
+specialist_effort = "high"
+
+[validator]
+id = "tests"
+argv = ["test"]
+budget_seconds = 1
+
+[harness]
+command = ["harness"]
+
+[policy]
+allowed_tools = ["read"]
+allowed_roots = ["shared"]
+
+[tracker]
+kind = "backlog"
+path = "BACKLOG.md"
+
+[preflight]
+tls_targets = ["example.test:443"]
+accepted_environment = ["SSL_CERT_FILE"]
+
+[selection]
+allow = ["A"]
+exclude = ["B"]
+
+[progress]
+file = true
+stderr = false
+command = ["notify"]
+command_timeout_seconds = 1
+""",
+    )
+
+    for index, profile in enumerate(profiles):
+        profile_root = tmp_path / str(index)
+        profile_root.mkdir()
+        _load(profile_root, profile)

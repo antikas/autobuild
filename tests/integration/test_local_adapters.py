@@ -133,7 +133,7 @@ def test_watch_prints_every_line_in_order_and_exits_zero(
     # The final lines and the completion line are all present before the first
     # poll, so the watcher drains them in one pass and stops.
     lines = [
-        "2026-09-04T12:00:00+00:00 campaign started: harness codex, models builder m, up to 1 items",
+        "2026-09-04T12:00:00+00:00 campaign started: harness codex, models builder m, efforts none, up to 1 items",
         "2026-09-04T12:00:01+00:00 item item-1 claimed: build a thing",
         "2026-09-04T12:00:02+00:00 item item-1 validation passed",
         "2026-09-04T12:00:03+00:00 campaign completed: shipped 1, parked 0, failed 0; "

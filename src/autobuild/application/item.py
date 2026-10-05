@@ -15,6 +15,8 @@ from autobuild.domain import (
     AdapterError,
     BuilderReport,
     CampaignRef,
+    CampaignStopReason,
+    ClaimTaken,
     CloseEvidence,
     CommandRequest,
     DiffEvidence,
@@ -44,12 +46,19 @@ from autobuild.domain import (
     SeatResult,
     SurfaceKind,
     ToolPolicy,
+    TrackerStop,
     ValidationEvidence,
     WorkspaceRef,
     review_verdict_rule_error,
 )
 from autobuild.enforcement import classify_item_nature
 from autobuild.ports import RunRecordPort
+
+# Every tracker write AutoBuild makes carries a role@host handle; a tracker that
+# tells writers apart refuses a bare role. A builder on an unnamed lane uses the
+# same host part as the coordinator.
+ACTOR_HOST = "autobuild"
+COORDINATOR_ACTOR = f"coordinator@{ACTOR_HOST}"
 
 # The three progress signals a stall kill reports as absent, in the order the
 # command adapter samples them. Kept here so the park reason names them without
@@ -207,12 +216,40 @@ class _PhaseMarker:
         )
 
 
+def unpublished_write(item_id: str, operation: str, note: str) -> RunEvent:
+    """The run event for a tracker write that was committed and not published.
+    It is not a stop: the write goes out with the next push of its branch."""
+
+    return RunEvent(
+        event_type="tracker.unpublished",
+        item_id=item_id,
+        payload={"operation": operation, "note": note},
+    )
+
+
 class ItemWorkflow:
-    def __init__(self, ports: WorkflowPorts) -> None:
+    def __init__(self, ports: WorkflowPorts, unpublished: list[str] | None = None) -> None:
         self._ports = ports
         # Per-item lane routing state, reset at the start of every ``run``.
         self._router: _LaneRouter | None = None
         self._builder_lane: str | None = None
+        # Tracker writes committed but not yet published, as "<item> <operation>",
+        # shared with the campaign that owns the report.
+        self._unpublished = unpublished if unpublished is not None else []
+
+    def record_publication(
+        self,
+        record: RunRecordRef,
+        item_id: str,
+        operation: str,
+        published: bool,
+        note: str,
+    ) -> None:
+        if published:
+            return
+        self._unpublished.append(f"{item_id} {operation}")
+        event = unpublished_write(item_id, operation, note)
+        self._event(record, event.event_type, event.item_id, payload=dict(event.payload))
 
     def _lanes(self) -> tuple[Lane, ...]:
         """The ordered lanes for this run, or a single unnamed fallback lane."""
@@ -223,7 +260,7 @@ class ItemWorkflow:
 
     @staticmethod
     def _lane_actor(lane_name: str) -> str:
-        return f"builder@{lane_name}" if lane_name else "builder"
+        return f"builder@{lane_name or ACTOR_HOST}"
 
     def run(
         self,
@@ -294,7 +331,7 @@ class ItemWorkflow:
                 self._advance(machine, marker, ItemState.VERIFIED)
                 start_lane = self._router.current_lane().name
                 claim_actor = self._lane_actor(start_lane)
-                self._ports.tracker.claim(spec.item, actor=claim_actor)
+                receipt = self._ports.tracker.claim(spec.item, actor=claim_actor)
                 claimed = True
                 self._advance(machine, marker, ItemState.CLAIMED)
                 self._event(
@@ -307,6 +344,13 @@ class ItemWorkflow:
                         "brief_ref": spec.item.brief_ref,
                         "title": spec.item.title,
                     },
+                )
+                self.record_publication(
+                    record,
+                    spec.item.item_id,
+                    "claim",
+                    receipt.published,
+                    receipt.publication_note,
                 )
 
                 workspace = self._ports.workspace.create_isolated(campaign, spec.item)
@@ -445,7 +489,7 @@ class ItemWorkflow:
                     commit_message=f"ADDED: {spec.item.title}",
                 ),
             )
-            self._ports.tracker.close(close, item_commit, workspace, actor="coordinator")
+            self._ports.tracker.close(close, item_commit, workspace, actor=COORDINATOR_ACTOR)
             tracker_commit = self._ports.workspace.commit_tracker(
                 workspace, spec.item.item_id, item_commit
             )
@@ -489,9 +533,19 @@ class ItemWorkflow:
             )
             return result
         except LanesExhausted as exc:
-            result = self._park_lanes_exhausted(
-                spec, machine, marker, record, workspace, seats, guard, exc, claimed
-            )
+            try:
+                result = self._park_lanes_exhausted(
+                    spec, machine, marker, record, workspace, seats, guard, exc, claimed
+                )
+            except TrackerStop as stop:
+                result = self._tracker_stopped(spec, machine, record, workspace, seats, guard, stop)
+                worktree_grant = self._release_worktree_lease(worktree_grant, record)
+            return result
+        except ClaimTaken:
+            raise
+        except TrackerStop as exc:
+            result = self._tracker_stopped(spec, machine, record, workspace, seats, guard, exc)
+            worktree_grant = self._release_worktree_lease(worktree_grant, record)
             return result
         except Exception as exc:
             structural = isinstance(exc, (EvidenceError, TypeError, ValueError))
@@ -509,6 +563,12 @@ class ItemWorkflow:
                         structural=structural,
                         kill=getattr(exc, "seat_kill", None),
                     )
+                    return result
+                except TrackerStop as stop:
+                    result = self._tracker_stopped(
+                        spec, machine, record, workspace, seats, guard, stop
+                    )
+                    worktree_grant = self._release_worktree_lease(worktree_grant, record)
                     return result
                 except Exception:
                     structural = True
@@ -549,6 +609,40 @@ class ItemWorkflow:
                             if part
                         )
                         return replace(result, reason=diagnostic)
+
+    def _tracker_stopped(
+        self,
+        spec: ItemExecutionSpec,
+        machine: ItemStateMachine,
+        record: RunRecordRef,
+        workspace: WorkspaceRef | None,
+        seats: list[SeatObservation],
+        guard: _ParkGuard,
+        exc: TrackerStop,
+    ) -> ItemOutcome:
+        """A tracker stop ends the item without another tracker write: no park is
+        attempted and the worktree is kept as evidence. The outcome carries the
+        states the item reached and the stop, so the campaign stops with it."""
+
+        if workspace is not None:
+            guard.leave_worktree = True
+        self._write_trajectory(
+            record, spec.item.item_id, ItemDisposition.FAILED, machine, seats, str(exc)
+        )
+        return ItemOutcome(
+            item_id=spec.item.item_id,
+            disposition=ItemDisposition.FAILED,
+            states=tuple(machine.history),
+            reason=str(exc),
+            title=spec.item.title,
+            seats=tuple(seats),
+            tracker_stop=(
+                CampaignStopReason.TRACKER_ENVIRONMENT
+                if exc.environment
+                else CampaignStopReason.TRACKER_REFUSED
+            ),
+            tracker_exit_code=exc.code,
+        )
 
     def _acquire_worktree_lease(
         self, campaign: CampaignRef, workspace: WorkspaceRef, record: RunRecordRef
@@ -969,7 +1063,7 @@ class ItemWorkflow:
             return
         actor = self._lane_actor(builder_lane)
         try:
-            self._ports.tracker.claim(spec.item, actor=actor)
+            receipt = self._ports.tracker.claim(spec.item, actor=actor)
         except Exception as exc:
             self._event(
                 record,
@@ -983,6 +1077,9 @@ class ItemWorkflow:
             "item.lane_changed",
             spec.item.item_id,
             payload={"actor": actor, "lane": builder_lane, "from_lane": start_lane},
+        )
+        self.record_publication(
+            record, spec.item.item_id, "claim", receipt.published, receipt.publication_note
         )
 
     def _park_lanes_exhausted(
@@ -1062,9 +1159,12 @@ class ItemWorkflow:
                 ),
                 brief_ref=brief_ref,
             )
-            ref = self._ports.tracker.propose(proposal, actor="coordinator")
+            ref = self._ports.tracker.propose(proposal, actor=COORDINATOR_ACTOR)
             if ref.runnable:
                 raise EvidenceError("follow-up proposal must remain non-runnable")
+            self.record_publication(
+                record, ref.proposal_id, "proposal", ref.published, ref.publication_note
+            )
             self._event(
                 record,
                 "item.follow_up_proposed",
@@ -1204,9 +1304,13 @@ class ItemWorkflow:
         tracker_reason = f"{reason} [snapshot={snapshot_dir}]" if snapshot_dir else reason
         finalise = None
         try:
-            self._ports.tracker.park(
-                spec.item.item_id, tracker_reason, actor="coordinator", workspace=workspace
+            publication = self._ports.tracker.park(
+                spec.item.item_id, tracker_reason, actor=COORDINATOR_ACTOR, workspace=workspace
             )
+            if publication is not None:
+                self.record_publication(
+                    record, spec.item.item_id, "park", publication.published, publication.note
+                )
             if workspace is not None:
                 tracker_commit = self._ports.workspace.commit_tracker(
                     workspace, spec.item.item_id, item_commit=None
@@ -1228,6 +1332,8 @@ class ItemWorkflow:
                     "snapshot_path": snapshot_dir,
                 },
             )
+            if isinstance(exc, TrackerStop):
+                raise
             return ItemOutcome(
                 item_id=spec.item.item_id,
                 disposition=ItemDisposition.FAILED,
